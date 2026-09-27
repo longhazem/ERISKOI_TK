@@ -1,3 +1,4 @@
+
 local repo = 'https://raw.githubusercontent.com/longhazem/ERISKOI_TK/main/'
 
 local LibrarySourceUrl = 'https://raw.githubusercontent.com/longhazem/ERISKOI_TK/main/LinoriaSrc.lua'
@@ -1871,7 +1872,7 @@ local function buildTeamPage(page, team)
         t.box3d = boxState.enabled and boxState.kind == "3D"
     end
 
-    -- ═══ LEFT: Boxes ═══════════════════════════════════════════
+    -- â•â•â• LEFT: Boxes â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
     local Boxes = page:AddSection({Title = "Boxes", Side = "Left"})
 
     Boxes:AddToggle({
@@ -1931,7 +1932,7 @@ local function buildTeamPage(page, team)
         Callback = espSetColor(t, "boxFillColor")
     })
 
-    -- ═══ LEFT: Health ══════════════════════════════════════════
+    -- â•â•â• LEFT: Health â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
     if team=="npc" or team=="players" then
     local Health = page:AddSection({Title = "Health", Side = "Left"})
 
@@ -1981,7 +1982,7 @@ local function buildTeamPage(page, team)
     })
 
     end
-    -- ═══ LEFT: Skeleton ════════════════════════════════════════
+    -- â•â•â• LEFT: Skeleton â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
     local Skeleton = page:AddSection({Title = "Skeleton", Side = "Left"})
 
     Skeleton:AddToggle({
@@ -2017,7 +2018,7 @@ local function buildTeamPage(page, team)
         Callback = function(color) adv.skeletonOutlineColor = color end
     })
 
-    -- ═══ RIGHT: Text ═══════════════════════════════════════════
+    -- â•â•â• RIGHT: Text â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
     local TextSec = page:AddSection({Title = "Text", Side = "Right"})
 
     TextSec:AddToggle({
@@ -2089,7 +2090,7 @@ local function buildTeamPage(page, team)
         Callback = function(v) t.distanceOutline = v end
     })
 
-    -- ═══ RIGHT: Tracer & Arrow ═════════════════════════════════
+    -- â•â•â• RIGHT: Tracer & Arrow â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
     local Tracers = page:AddSection({Title = "Tracer & Arrow", Side = "Right"})
 
     Tracers:AddToggle({
@@ -2149,7 +2150,7 @@ local function buildTeamPage(page, team)
         Callback = espSetColor(t, "offScreenArrowColor")
     })
 
-    -- ═══ RIGHT: Chams ══════════════════════════════
+    -- â•â•â• RIGHT: Chams â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
     local ChamsSec = page:AddSection({Title = "Chams", Side = "Right"})
 
     ChamsSec:AddToggle({
@@ -2198,7 +2199,7 @@ for _,entry in ipairs({{ZombiePage,"zombies"},{CorpsePage,"corpses"}}) do
     addESPDistance(general,kind)
     buildTeamPage(page,kind)
 end
--- Settings page ───────────────────────────────────────────────
+-- Settings page â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 local SharedLeft = SharedPage:AddSection({Title = "Settings", Side = "Left"})
 
 SharedLeft:AddSlider({
@@ -2309,7 +2310,7 @@ local installPreview=function(Context)
             local actor=candidates[Preview.random:NextInteger(1,#candidates)]
             local name=actor.DisplayName or (actor.OwnerName~="???" and actor.OwnerName) or actor.Character.Name
             return {model=actor.Character,actor=actor,label=kind=="zombies" and "Zombie" or tostring(name),
-                detail=kind=="zombies" and "Live zombie · snapshot" or "Random NPC · snapshot"}
+                detail=kind=="zombies" and "Live zombie Â· snapshot" or "Random NPC Â· snapshot"}
         end
         if previous and eligible(previous.actor) then return previous end
         if kind=="zombies" then
@@ -2509,10 +2510,10 @@ local installPreview=function(Context)
         local camera=Instance.new("Camera");camera.FieldOfView=30;camera.Parent=viewport;viewport.CurrentCamera=camera
         local overlay=Instance.new("Frame");overlay.Name="Overlay";overlay.BackgroundTransparency=1
         overlay.Size=UDim2.fromScale(1,1);overlay.ClipsDescendants=true;overlay.ZIndex=12;overlay.Parent=viewport
-        Preview.empty=label(panel,"Waiting for a model…",UDim2.new(0,18,.5,-24),UDim2.new(1,-36,0,48),13)
+        Preview.empty=label(panel,"Waiting for a modelâ€¦",UDim2.new(0,18,.5,-24),UDim2.new(1,-36,0,48),13)
         Preview.empty.TextWrapped=true;Preview.empty.TextXAlignment=Enum.TextXAlignment.Center
         Preview.status=label(panel,"",UDim2.new(0,12,1,-68),UDim2.new(1,-24,0,17),11)
-        Preview.hint=label(panel,"Drag to rotate · Scroll to zoom",UDim2.new(0,12,1,-49),UDim2.new(1,-24,0,15),11)
+        Preview.hint=label(panel,"Drag to rotate Â· Scroll to zoom",UDim2.new(0,12,1,-49),UDim2.new(1,-24,0,15),11)
         Preview.hint.TextTransparency=.35
         Preview.panel=panel;Preview.viewport=viewport;Preview.world=world;Preview.camera=camera;Preview.overlay=overlay
         Preview.reset=button(panel,"Reset view",UDim2.new(0,12,1,-29),UDim2.new(.5,-18,0,22),function()
@@ -2544,10 +2545,10 @@ local installPreview=function(Context)
         if force or not Preview.object or not source or not old or old.model~=source.model or old.revision~=source.revision then
             local ok=Preview.BuildModel(kind,source)
             Preview.empty.Visible=not ok
-            Preview.empty.Text=source and "Model could not be copied. Retrying…" or
-                (kind=="players" and "Waiting for your character…" or "No "..labels[kind].." model available. Retrying…")
+            Preview.empty.Text=source and "Model could not be copied. Retryingâ€¦" or
+                (kind=="players" and "Waiting for your characterâ€¦" or "No "..labels[kind].." model available. Retryingâ€¦")
         end
-        Preview.subtitle.Text=source and (labels[kind].." · "..source.label) or labels[kind]
+        Preview.subtitle.Text=source and (labels[kind].." Â· "..source.label) or labels[kind]
         Preview.shuffle.Visible=kind~="players"
         Preview.shuffle.Text=kind=="npc" and "Another NPC" or
             (source and source.actor and "Another zombie" or "Refresh model")
@@ -2616,7 +2617,7 @@ local installPreview=function(Context)
             part.Color=Sense.sharedSettings.teamBasedColor and Preview.actor.PreviewTeamColor or chams.visibleColor
             part.Transparency=settings.enabled and chams.enabled and 1-chams.visibleIntensity or 1
         end
-        Preview.status.Text=(Preview.source and Preview.source.detail or "")..(settings.enabled and "" or " · ESP off")
+        Preview.status.Text=(Preview.source and Preview.source.detail or "")..(settings.enabled and "" or " Â· ESP off")
     end
     function Preview.Destroy()
         if Preview.destroyed then return end
@@ -4223,7 +4224,7 @@ function WM.Apply()
 end
 table.insert(Combat.connections, AimRunService.RenderStepped:Connect(WM.Apply))
 
--- ── World ─────────────────────────────────────────────────────
+-- â”€â”€ World â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 local WMWorld = VisualsPage:AddSection({ Title = "World", Side = "Left" })
 WMWorld:AddToggle({Text="FPS Booster",Flag="wm_fps_booster",Default=false,Callback=Booster.SetEnabled})
 
@@ -4336,7 +4337,7 @@ wm_setVisible(wmFogStart, false)
 wm_setVisible(wmFogEnd, false)
 wm_setVisible(wmFogColor, false)
 
--- ── Lighting ──────────────────────────────────────────────────
+-- â”€â”€ Lighting â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 local WMLight = VisualsPage:AddSection({ Title = "Lighting", Side = "Right" })
 
 WMLight:AddToggle({
@@ -4403,7 +4404,7 @@ wm_setVisible(wmExposure, false)
 wm_setVisible(wmDiffuse, false)
 wm_setVisible(wmSpecular, false)
 
--- ── Graphics ──────────────────────────────────────────────────
+-- â”€â”€ Graphics â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 local WMGraphics = VisualsPage:AddSection({ Title = "Graphics", Side = "Right" })
 
 local wmShadowSoftness, wmTechDropdown
@@ -4697,372 +4698,3 @@ for _, id in ipairs({ 'silent_key', 'trigger_key', 'rage_key' }) do
     if picker.Value == 'MB2' then picker:SetValue({ 'None', picker.Mode }) end
 end
 Combat.ESP.Load()
-
--- ==========================================
--- NIGHT VISION (NVG)
--- ColorCorrectionEffect — Green / Blue mode
--- ==========================================
-local NVG = {
-    Enabled = false,
-    Color = "Green",
-    _effect = nil,
-    _Colors = {
-        Green = Color3.fromRGB(112, 245, 65),
-        Blue  = Color3.fromRGB(165, 233, 255),
-    },
-}
-
-local function NVG_Apply()
-    if not NVG._effect then
-        NVG._effect = Instance.new("ColorCorrectionEffect")
-        NVG._effect.Name = "TK_NightVision"
-        NVG._effect.Parent = game:GetService("Lighting")
-    end
-    NVG._effect.TintColor   = NVG._Colors[NVG.Color] or NVG._Colors.Green
-    NVG._effect.Brightness  = 0.15
-    NVG._effect.Contrast    = 0.5
-    NVG._effect.Saturation  = -1
-    NVG._effect.Enabled     = NVG.Enabled
-end
-
-local NVGGroup = Tabs.Mods:AddLeftGroupbox("Night Vision")
-NVGGroup:AddToggle("nvg_enabled", { Text = "Enable NVG", Default = false }):OnChanged(function(v)
-    NVG.Enabled = v
-    NVG_Apply()
-end)
-NVGGroup:AddDropdown("nvg_color", {
-    Text    = "NVG Color",
-    Values  = { "Green", "Blue" },
-    Default = "Green",
-}):OnChanged(function(v)
-    NVG.Color = v
-    if NVG.Enabled then NVG_Apply() end
-end)
-
--- ==========================================
--- TK WALKSPEED — hooks vào M._accelerate đã install
--- Ghi đè ctrl.MoveSpeed sau khi accelerate chạy xong
--- Không conflict với M.Speed vì chạy trên Heartbeat riêng
--- ==========================================
-local TK_Walk = {
-    Enabled = false,
-    Value   = 24,
-    Sprint  = false,
-    SprintV = 32,
-    _conn   = nil,
-}
-
-local function TK_Walk_Tick()
-    if not TK_Walk.Enabled then return end
-    local M = Combat.Movement
-    if not M then return end
-    local ctrl = M.currentController
-    if not ctrl then return end
-    local actor = ctrl._localActor
-    if not actor or not actor.Alive then return end
-    local isSprinting = ctrl.IsSprinting == true
-    local target = (TK_Walk.Sprint and isSprinting) and TK_Walk.SprintV or TK_Walk.Value
-    -- MoveSpeed is studs/s — set directly after accelerate writes it
-    pcall(function()
-        if ctrl.MoveSpeed and ctrl.MoveSpeed > 0 then
-            ctrl.MoveSpeed = target
-        end
-        actor.SpeedPenalty = nil
-        actor.HitSlowness  = nil
-    end)
-end
-
-local function TK_Walk_Start()
-    if TK_Walk._conn then return end
-    TK_Walk._conn = AimRunService.Heartbeat:Connect(TK_Walk_Tick)
-end
-
-local function TK_Walk_Stop()
-    if TK_Walk._conn then
-        pcall(function() TK_Walk._conn:Disconnect() end)
-        TK_Walk._conn = nil
-    end
-end
-
-local WalkGroup = Tabs.Movement:AddRightGroupbox("TK WalkSpeed")
-WalkGroup:AddToggle("tk_walk_enabled", { Text = "Enable TK Speed", Default = false }):OnChanged(function(v)
-    TK_Walk.Enabled = v
-    if v then TK_Walk_Start() else TK_Walk_Stop() end
-end)
-WalkGroup:AddSlider("tk_walk_value", {
-    Text = "Walk Speed", Min = 1, Max = 300, Default = 24, Rounding = 1, Suffix = " studs/s",
-}):OnChanged(function(v) TK_Walk.Value = v end)
-WalkGroup:AddToggle("tk_walk_sprint", { Text = "Custom Sprint Speed", Default = false }):OnChanged(function(v)
-    TK_Walk.Sprint = v
-end)
-WalkGroup:AddSlider("tk_walk_sprint_value", {
-    Text = "Sprint Speed", Min = 1, Max = 300, Default = 32, Rounding = 1, Suffix = " studs/s",
-}):OnChanged(function(v) TK_Walk.SprintV = v end)
-
--- ==========================================
--- TK FLY — inject thẳng vào M.Install CharacterController
--- Piggybacking M.flyActive flag — khi M.flyActive=true,
--- logic Update đã bị M.Wrap override → tao chỉ cần set
--- M.Fly=true + M.flyActive=true qua key state
--- Nhưng mày muốn fly logic KHÁC: không dùng camera look vector
--- mà dùng physics:SetState trực tiếp sau khi controller Update chạy
--- ==========================================
-local TK_Fly = {
-    Enabled = false,
-    Speed   = 60,
-    _conn   = nil,
-}
-
-local function TK_Fly_Tick(dt)
-    if not TK_Fly.Enabled then return end
-    local M = Combat.Movement
-    if not M then return end
-    local ctrl = M.currentController
-    if not ctrl then return end
-    local actor = ctrl._localActor
-    if not actor or not actor.Alive then return end
-    if not M.CanMove(ctrl) then return end
-
-    local camera = workspace.CurrentCamera
-    if not camera then return end
-
-    local UIS = AimUIS
-    local dir = Vector3.zero
-    if not Library:IsTyping() then
-        if UIS:IsKeyDown(Enum.KeyCode.W)           then dir += camera.CFrame.LookVector end
-        if UIS:IsKeyDown(Enum.KeyCode.S)           then dir -= camera.CFrame.LookVector end
-        if UIS:IsKeyDown(Enum.KeyCode.A)           then dir -= camera.CFrame.RightVector end
-        if UIS:IsKeyDown(Enum.KeyCode.D)           then dir += camera.CFrame.RightVector end
-        if UIS:IsKeyDown(Enum.KeyCode.Space)       then dir += Vector3.yAxis end
-        if UIS:IsKeyDown(Enum.KeyCode.LeftControl) then dir -= Vector3.yAxis end
-    end
-
-    local boost = UIS:IsKeyDown(Enum.KeyCode.LeftShift) and 2.5 or 1
-    local speed = TK_Fly.Speed * boost
-
-    -- Flatten Y dari look vector supaya W/S tidak naik/turun kecuali Space/Ctrl
-    dir = Vector3.new(dir.X, dir.Y, dir.Z)
-    if dir.Magnitude > 1 then dir = dir.Unit end
-
-    local position = ctrl._position or actor.Position
-    local target = position + dir * speed * math.clamp(dt, 0, 0.1)
-
-    -- Write to controller + actor — same pattern M.Update uses internally
-    pcall(function()
-        ctrl._position          = target
-        ctrl._correctedPosition = target
-        ctrl._groundHitbox      = nil
-        ctrl.VelocityGravity    = 0
-        ctrl.MoveSpeed          = 0
-        ctrl.IsGrounded         = true
-        ctrl.IsSliding          = false
-        ctrl.IsSprinting        = false
-        ctrl._lastMovement      = Vector2.zero
-    end)
-    pcall(function()
-        actor.Platform           = nil
-        actor.SimulatedPosition  = target
-        actor.Grounded           = true
-        actor.ForceNextPosition  = target
-        actor.Position           = target
-        actor.Sliding            = false
-        actor.Sprinting          = false
-        actor.HeightState        = 0
-        if typeof(actor.CFrame) == "CFrame" then
-            actor.CFrame = CFrame.new(target) * actor.CFrame.Rotation
-        end
-    end)
-end
-
-local function TK_Fly_Start()
-    if TK_Fly._conn then return end
-    TK_Fly._conn = AimRunService.Heartbeat:Connect(function(dt)
-        local ok, err = pcall(TK_Fly_Tick, dt)
-        if not ok then warn("[TK_Fly] " .. tostring(err)) end
-    end)
-end
-
-local function TK_Fly_Stop()
-    if TK_Fly._conn then
-        pcall(function() TK_Fly._conn:Disconnect() end)
-        TK_Fly._conn = nil
-    end
-end
-
-local TKFlyGroup = Tabs.Movement:AddRightGroupbox("TK Fly")
-TKFlyGroup:AddToggle("tk_fly_enabled", { Text = "Enable TK Fly", Default = false }):OnChanged(function(v)
-    TK_Fly.Enabled = v
-    if v then TK_Fly_Start() else TK_Fly_Stop() end
-end)
-TKFlyGroup:AddSlider("tk_fly_speed", {
-    Text = "TK Fly Speed", Min = 1, Max = 500, Default = 60, Rounding = 1, Suffix = " studs/s",
-}):OnChanged(function(v) TK_Fly.Speed = v end)
-
--- ==========================================
--- AUTO REMOVE TREE
--- Xóa cây theo prefix — Heartbeat hoặc one-shot
--- ==========================================
-local TK_Tree = {
-    Enabled     = false,
-    Prefixes    = { "arb", "qradbiq", "oradbbig", "oragedbbig" },
-    _conn       = nil,
-}
-
-local function TK_Tree_Delete()
-    local toRemove = {}
-    local marked   = {}
-    for _, obj in pairs(workspace:GetDescendants()) do
-        local name = obj.Name:lower()
-        for _, p in ipairs(TK_Tree.Prefixes) do
-            if name:sub(1, #p) == p then
-                if obj:IsA("Model") or obj:IsA("Folder") then
-                    table.insert(toRemove, obj)
-                    marked[obj] = true
-                else
-                    local parent = obj.Parent
-                    if parent and not marked[parent] then
-                        table.insert(toRemove, obj)
-                    end
-                end
-                break
-            end
-        end
-    end
-    for _, obj in ipairs(toRemove) do
-        if obj and obj.Parent then
-            pcall(function() obj:Destroy() end)
-        end
-    end
-end
-
-local TreeGroup = Tabs.Mods:AddRightGroupbox("Auto Remove Tree")
-TreeGroup:AddToggle("tk_tree_enabled", { Text = "Auto Remove (Heartbeat)", Default = false }):OnChanged(function(v)
-    TK_Tree.Enabled = v
-    if v then
-        if TK_Tree._conn then return end
-        TK_Tree._conn = game:GetService("RunService").Heartbeat:Connect(function()
-            if TK_Tree.Enabled then TK_Tree_Delete() end
-        end)
-    else
-        if TK_Tree._conn then
-            pcall(function() TK_Tree._conn:Disconnect() end)
-            TK_Tree._conn = nil
-        end
-    end
-end)
-TreeGroup:AddButton("Remove Once", function()
-    TK_Tree_Delete()
-    Library:Notify("Trees removed!")
-end)
-
--- ==========================================
--- VEHICLE TELEPORTER
--- Lưu CF xe → teleport về sau, dùng SetState solver
--- ==========================================
-local TK_VTP = { _savedCF = nil }
-
-local function VTP_GetVehicle()
-    -- Method 1: scan GC for live vehicle with Controlling=true
-    local ok, gc = pcall(function() return getgc(true) end)
-    if not ok or type(gc) ~= "table" then return nil end
-    for _, obj in pairs(gc) do
-        if type(obj) == "table"
-            and rawget(obj, "Controlling") == true
-            and rawget(obj, "ComponentReplicates") ~= nil
-            and (rawget(obj, "SetRPM") or rawget(obj, "_updateLightModes") or rawget(obj, "Hitbox"))
-        then
-            return obj
-        end
-    end
-    return nil
-end
-
-local function VTP_GetSolver(vehicle)
-    -- Scan GC for controller wrapping this vehicle
-    local ok, gc = pcall(function() return getgc(true) end)
-    if not ok or type(gc) ~= "table" then return nil end
-    for _, obj in pairs(gc) do
-        if type(obj) == "table" then
-            local veh = rawget(obj, "_vehicle")
-            local slv = rawget(obj, "_solver")
-            if veh == vehicle and type(slv) == "table" and type(rawget(slv, "SetState")) == "function" then
-                return slv
-            end
-        end
-    end
-    -- Fallback: scan for solver directly
-    for _, obj in pairs(gc) do
-        if type(obj) == "table"
-            and type(rawget(obj, "SetState")) == "function"
-            and rawget(obj, "_vehicle") == nil
-            and (rawget(obj, "GetLinearVelocity") or rawget(obj, "_angularVelocity") or rawget(obj, "_linearVelocity"))
-        then
-            return obj
-        end
-    end
-    return nil
-end
-
-local function VTP_Teleport(cf)
-    local vehicle = VTP_GetVehicle()
-    if not vehicle then
-        Library:Notify("Hãy lên xe trước!")
-        return
-    end
-    -- Move vehicle body
-    pcall(function()
-        vehicle.CFrame = cf
-        if vehicle.Hitbox then vehicle.Hitbox.CFrame = cf end
-        if vehicle.Model and vehicle.Model.PrimaryPart then
-            vehicle.Model:PivotTo(cf)
-        end
-    end)
-    -- SetState on solver to zero velocity
-    pcall(function()
-        local solver = VTP_GetSolver(vehicle)
-        if solver and solver.SetState then
-            solver:SetState(cf, Vector3.zero, Vector3.zero, vehicle.ComponentReplicates)
-        end
-    end)
-    -- Sync local actor position
-    pcall(function()
-        local svc = Combat and Combat.Service and Combat.Service()
-        local actor = svc and svc.Replicator and svc.Replicator.LocalActor
-        if actor then actor.SimulatedPosition = cf.Position end
-    end)
-    Library:Notify("Xe đã teleport!")
-end
-
-local VTPGroup = Tabs.Mods:AddLeftGroupbox("Vehicle Teleporter")
-VTPGroup:AddButton("Lưu Toạ Độ Xe", function()
-    local vehicle = VTP_GetVehicle()
-    if vehicle then
-        local cf = vehicle.CFrame
-            or (vehicle.Hitbox and vehicle.Hitbox.CFrame)
-            or (vehicle.Model and vehicle.Model.PrimaryPart and vehicle.Model.PrimaryPart.CFrame)
-        if cf then
-            TK_VTP._savedCF = cf
-            Library:Notify("Đã lưu toạ độ xe!")
-            return
-        end
-    end
-    local svc = Combat and Combat.Service and Combat.Service()
-    local actor = svc and svc.Replicator and svc.Replicator.LocalActor
-    if actor and actor.Position then
-        TK_VTP._savedCF = CFrame.new(actor.Position)
-        Library:Notify("Đã lưu toạ độ nhân vật!")
-    else
-        Library:Notify("Không tìm được toạ độ!")
-    end
-end)
-VTPGroup:AddButton("Teleport Xe", function()
-    if not TK_VTP._savedCF then
-        Library:Notify("Chưa lưu toạ độ!")
-        return
-    end
-    VTP_Teleport(TK_VTP._savedCF)
-end)
-VTPGroup:AddButton("Xóa Toạ Độ", function()
-    TK_VTP._savedCF = nil
-    Library:Notify("Đã xóa toạ độ!")
-end)
