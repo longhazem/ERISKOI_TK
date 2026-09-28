@@ -1,3 +1,4 @@
+
 local repo = 'https://raw.githubusercontent.com/longhazem/ERISKOI_TK/main/'
 
 local LibrarySourceUrl = 'https://raw.githubusercontent.com/longhazem/ERISKOI_TK/main/LinoriaSrc.lua'
@@ -3125,7 +3126,6 @@ do
         end
         if not M.installed and tick()> (M.nextResolve or 0) then
             M.nextResolve=tick()+2
-            -- Method 1: getloadedmodules (BRM5 native)
             for _,module in ipairs(getloadedmodules()) do
                 if module.Name=="CharacterController" then
                     local ok,class=pcall(require,module)
@@ -3135,87 +3135,6 @@ do
                         else M.Destroy();warn("[Movements] "..tostring(err)) end
                     end
                     break
-                end
-            end
-            -- Method 2: GC scan (tipmobile BulkScan) — runs if getloadedmodules found nothing
-            if not M.installed and not M.tmHooked then
-                local ok,res=pcall(function() return filtergc("table") end)
-                if not ok or type(res)~="table" then ok,res=pcall(function() return getgc(true) end) end
-                if ok and type(res)=="table" then
-                    local class=nil
-                    for _,obj in pairs(res) do
-                        if type(obj)=="table" and rawget(obj,"SetCFrame") and rawget(obj,"SetVehicleGoal") then
-                            if rawget(obj,"__index")==obj or not rawget(obj,"Parent") then
-                                class=obj; break
-                            end
-                        end
-                    end
-                    if not class then
-                        local svc=Combat.Service()
-                        local la=svc and svc.Replicator and svc.Replicator.LocalActor
-                        if la then
-                            for _,obj in pairs(res) do
-                                if type(obj)=="table" and rawget(obj,"_localActor")==la and rawget(obj,"Update") then
-                                    class=obj; break
-                                end
-                            end
-                        end
-                    end
-                    if class then
-                        local installed=pcall(M.Install,class)
-                        if installed then
-                            M.installed=true
-                        else
-                            -- M.Install needs _accelerate etc — missing here, hook Update directly
-                            local target=class
-                            if not rawget(target,"Update") then
-                                local meta=getmetatable(target)
-                                local idx=meta and (meta.__index or meta)
-                                if type(idx)=="table" and idx.Update then target=idx end
-                            end
-                            if target and target.Update and not target._tmUpdate then
-                                target._tmUpdate=target.Update
-                                local OldUpdate=target._tmUpdate
-                                local Camera=AimCamera
-                                local UIS=AimUIS
-                                target.Update=function(self,viewInput,dt,...)
-                                    if M.flyActive then
-                                        local svc=Combat.Service()
-                                        local actor=(svc and svc.Replicator and svc.Replicator.LocalActor) or (self and self._localActor)
-                                        if not actor or not actor.Alive then return OldUpdate(self,viewInput,dt,...) end
-                                        self.VelocityGravity=0; self.HeightState=0; self.IsGrounded=true
-                                        local camCF=Camera.CFrame
-                                        local dir=Vector3.new(0,0,0)
-                                        if viewInput and viewInput.Magnitude>0 then
-                                            dir=dir+(camCF.LookVector*-viewInput.Y)+(camCF.RightVector*viewInput.X)
-                                        end
-                                        if UIS:IsKeyDown(Enum.KeyCode.Space) then dir=dir+Vector3.new(0,1,0) end
-                                        if UIS:IsKeyDown(Enum.KeyCode.LeftControl) then dir=dir-Vector3.new(0,1,0) end
-                                        if dir.Magnitude>0 then
-                                            local spd=(tonumber(M.FlySpeed) or 40)
-                                                *(UIS:IsKeyDown(Enum.KeyCode.LeftShift) and 2.5 or 1)
-                                                *(M.modifierActive and (M.Multiplier or 2) or 1)
-                                            local dt2=type(dt)=="number" and dt or 0.016
-                                            local nextPos=(self._position or Vector3.new())+(dir.Unit*spd*dt2)
-                                            self._position=nextPos; self._lastSafePosition=nextPos
-                                            actor.SimulatedPosition=nextPos; actor.Grounded=true; actor.Sprinting=false
-                                            local _,yRot=Camera.CFrame:ToOrientation()
-                                            actor.CFrame=CFrame.new(nextPos)*CFrame.Angles(0,yRot,0)
-                                            actor.Orientation=yRot
-                                        end
-                                        return
-                                    else
-                                        if self._localActor then
-                                            if self._localActor.Rappelling then self._localActor.Rappelling=false end
-                                            if self.HeightState==nil then self.HeightState=0; self._localActor.HeightState=0 end
-                                        end
-                                        return OldUpdate(self,viewInput,dt,...)
-                                    end
-                                end
-                                M.tmHooked=true
-                            end
-                        end
-                    end
                 end
             end
         end
