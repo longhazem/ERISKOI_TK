@@ -2733,107 +2733,9 @@ do
     local left=MovementPage:AddSection({Title="Movement",Side="Left"})
     local right=MovementPage:AddSection({Title="Misc",Side="Right"})
 
-    -- TK WalkSpeed section inside MovementPage
-    local tkwalk_left  = MovementPage:AddSection({Title="TK Speed", Side="Left"})
-    local tkwalk_right = MovementPage:AddSection({Title="TK Sprint", Side="Right"})
-    local TK_Walk = { Enabled=false, Value=16, Sprint=false, SprintV=25, _conn=nil }
-    local function TK_Walk_Start()
-        if TK_Walk._conn then return end
-        TK_Walk._conn = AimRunService.Heartbeat:Connect(function()
-            if not TK_Walk.Enabled then return end
-            local svc=Combat.Service(); local actor=svc and svc.Replicator and svc.Replicator.LocalActor
-            if not actor then return end
-            local ctrl=M.currentController; local isSprinting=ctrl and ctrl.IsSprinting
-            local mult=1
-            if TK_Walk.Sprint and isSprinting then mult=TK_Walk.SprintV/16.8
-            elseif TK_Walk.Enabled and not isSprinting then mult=TK_Walk.Value/12 end
-            actor.SpeedPenalty=mult
-        end)
-    end
-    local function TK_Walk_Stop()
-        if TK_Walk._conn then pcall(function() TK_Walk._conn:Disconnect() end); TK_Walk._conn=nil end
-        local svc=Combat.Service(); local actor=svc and svc.Replicator and svc.Replicator.LocalActor
-        if actor then pcall(function() actor.SpeedPenalty=nil end) end
-    end
-    tkwalk_left:AddToggle({Text="Enable TK Speed",Flag="tk_walk_enabled",Default=false,
-        Callback=function(v) TK_Walk.Enabled=v; if v then TK_Walk_Start() else TK_Walk_Stop() end end})
-    tkwalk_left:AddSlider({Text="Walk Speed",Flag="tk_walk_value",Min=1,Max=300,Default=16,Rounding=1,Suffix=" studs/s",
-        Callback=function(v) TK_Walk.Value=v end})
-    tkwalk_right:AddToggle({Text="Custom Sprint",Flag="tk_walk_sprint",Default=false,
-        Callback=function(v) TK_Walk.Sprint=v end})
-    tkwalk_right:AddSlider({Text="Sprint Speed",Flag="tk_walk_sprint_value",Min=1,Max=300,Default=25,Rounding=1,Suffix=" studs/s",
-        Callback=function(v) TK_Walk.SprintV=v end})
     local flight=FlightPage:AddSection({Title="Fly",Side="Left"})
     local modifier=FlightPage:AddSection({Title="Modifier",Side="Right"})
 
-    -- TK Fly section inside FlightPage
-    local tkfly_left = FlightPage:AddSection({Title="TK Fly", Side="Left"})
-    local TK_Fly = { Enabled=false, Speed=50, _hooked=false, _originalUpdate=nil, _controller=nil }
-    local function TK_Fly_FindController()
-        for _, module in ipairs(getloadedmodules()) do
-            if module.Name=="CharacterController" then
-                local ok,class=pcall(require,module)
-                if ok and type(class)=="table" and type(class.Update)=="function" then return class end
-            end
-        end
-        if M.currentController then
-            local meta=getmetatable(M.currentController)
-            local idx=meta and (meta.__index or meta)
-            if type(idx)=="table" and type(idx.Update)=="function" then return idx end
-            if type(M.currentController.Update)=="function" then return M.currentController end
-        end
-        return nil
-    end
-    local function TK_Fly_Hook()
-        if TK_Fly._hooked then return end
-        local ctrl=TK_Fly_FindController(); if not ctrl then return end
-        TK_Fly._controller=ctrl; TK_Fly._originalUpdate=ctrl.Update
-        local OldUpdate=ctrl.Update
-        ctrl.Update=function(self,viewInput,dt,...)
-            if TK_Fly.Enabled then
-                local svc=Combat.Service()
-                local localActor=(svc and svc.Replicator and svc.Replicator.LocalActor) or (self and self._localActor)
-                if localActor and localActor.Alive then
-                    self.VelocityGravity=0; self.HeightState=0; self.IsGrounded=true
-                    local camCF=workspace.CurrentCamera.CFrame; local dir=Vector3.new(0,0,0)
-                    if viewInput and viewInput.Magnitude>0 then
-                        dir=dir+(camCF.LookVector*-viewInput.Y)+(camCF.RightVector*viewInput.X)
-                    end
-                    if AimUIS:IsKeyDown(Enum.KeyCode.Space) then dir=dir+Vector3.new(0,1,0) end
-                    if AimUIS:IsKeyDown(Enum.KeyCode.LeftControl) then dir=dir-Vector3.new(0,1,0) end
-                    if dir.Magnitude>0 then
-                        local speed=TK_Fly.Speed; local boost=AimUIS:IsKeyDown(Enum.KeyCode.LeftShift) and 2.5 or 1
-                        local delta=type(dt)=="number" and dt or 0.016
-                        local nextPos=(self._position or localActor.Position)+(dir.Unit*speed*boost*delta)
-                        self._position=nextPos; self._lastSafePosition=nextPos
-                        localActor.SimulatedPosition=nextPos; localActor.Grounded=true; localActor.Sprinting=false
-                        local _,yRot=workspace.CurrentCamera.CFrame:ToOrientation()
-                        localActor.CFrame=CFrame.new(nextPos)*CFrame.Angles(0,yRot,0); localActor.Orientation=yRot
-                    end
-                    return
-                end
-            end
-            if self._localActor then
-                if self._localActor.Rappelling then self._localActor.Rappelling=false end
-                if self.HeightState==nil then self.HeightState=0; self._localActor.HeightState=0 end
-            end
-            return OldUpdate(self,viewInput,dt,...)
-        end
-        TK_Fly._hooked=true
-    end
-    local _tkFlyRetry=nil
-    local function TK_Fly_Enable()
-        TK_Fly_Hook()
-        if TK_Fly._hooked then if _tkFlyRetry then _tkFlyRetry:Disconnect(); _tkFlyRetry=nil end; return end
-        if _tkFlyRetry then return end
-        _tkFlyRetry=AimRunService.Heartbeat:Connect(function()
-            TK_Fly_Hook(); if TK_Fly._hooked then _tkFlyRetry:Disconnect(); _tkFlyRetry=nil end
-        end)
-    end
-    tkfly_left:AddToggle({Text="Enable TK Fly",Flag="tk_fly_enabled",Default=false,
-        Callback=function(v) TK_Fly.Enabled=v; if v then TK_Fly_Enable() end end})
-    tkfly_left:AddSlider({Text="TK Fly Speed",Flag="tk_fly_speed",Min=1,Max=500,Default=50,Rounding=1,Suffix=" studs/s",
-        Callback=function(v) TK_Fly.Speed=v end})
     local function toggle(section,text,key)
         return section:AddToggle({Text=text,Flag="movement_"..key,Default=false,
             Callback=function(v) M[key]=v end})
@@ -4582,12 +4484,122 @@ end
 
 end
 
--- NVG + Auto Remove Tree inside World Mods (VisualsPage)
+
+
+
+
+
+-- ── TK Speed (Movement tab, new subtab) ──
+local TKSpeedPage = legacyPage(Tabs.Movement, movementPages, 'TK Speed')
 do
-    local NVGSection  = VisualsPage:AddSection({Title="Night Vision", Side="Left"})
-    local TreeSection = VisualsPage:AddSection({Title="Tree Remover", Side="Right"})
-    local NVG={Enabled=false,Color="Green",_effect=nil,
-        _Colors={Green=Color3.fromRGB(112,245,65),Blue=Color3.fromRGB(165,233,255)}}
+    local TK_Walk = { Enabled=false, Value=16, Sprint=false, SprintV=25, _conn=nil }
+    local function TK_Walk_Start()
+        if TK_Walk._conn then return end
+        TK_Walk._conn = AimRunService.Heartbeat:Connect(function()
+            if not TK_Walk.Enabled then return end
+            local svc=Combat.Service(); local actor=svc and svc.Replicator and svc.Replicator.LocalActor
+            if not actor then return end
+            local ctrl=M.currentController; local isSprinting=ctrl and ctrl.IsSprinting
+            local mult=1
+            if TK_Walk.Sprint and isSprinting then mult=TK_Walk.SprintV/16.8
+            elseif TK_Walk.Enabled and not isSprinting then mult=TK_Walk.Value/12 end
+            actor.SpeedPenalty=mult
+        end)
+    end
+    local function TK_Walk_Stop()
+        if TK_Walk._conn then pcall(function() TK_Walk._conn:Disconnect() end); TK_Walk._conn=nil end
+        local svc=Combat.Service(); local actor=svc and svc.Replicator and svc.Replicator.LocalActor
+        if actor then pcall(function() actor.SpeedPenalty=nil end) end
+    end
+    local left  = TKSpeedPage:AddSection({Title="Walk Speed", Side="Left"})
+    local right = TKSpeedPage:AddSection({Title="Sprint Speed", Side="Right"})
+    left:AddToggle({Text="Enable TK Speed", Flag="tk_walk_enabled", Default=false,
+        Callback=function(v) TK_Walk.Enabled=v; if v then TK_Walk_Start() else TK_Walk_Stop() end end})
+    left:AddSlider({Text="Walk Speed", Flag="tk_walk_value", Min=1, Max=300, Default=16, Rounding=1, Suffix=" studs/s",
+        Callback=function(v) TK_Walk.Value=v end})
+    right:AddToggle({Text="Custom Sprint", Flag="tk_walk_sprint", Default=false,
+        Callback=function(v) TK_Walk.Sprint=v end})
+    right:AddSlider({Text="Sprint Speed", Flag="tk_walk_sprint_value", Min=1, Max=300, Default=25, Rounding=1, Suffix=" studs/s",
+        Callback=function(v) TK_Walk.SprintV=v end})
+end
+
+-- ── TK Fly (Movement tab, new subtab) ──
+local TKFlyPage = legacyPage(Tabs.Movement, movementPages, 'TK Fly')
+do
+    local TK_Fly = { Enabled=false, Speed=50, _hooked=false, _originalUpdate=nil, _controller=nil }
+    local function TK_Fly_FindController()
+        for _, mod in ipairs(getloadedmodules()) do
+            if mod.Name=="CharacterController" then
+                local ok,class=pcall(require,mod)
+                if ok and type(class)=="table" and type(class.Update)=="function" then return class end
+            end
+        end
+        if M.currentController then
+            local meta=getmetatable(M.currentController)
+            local idx=meta and (meta.__index or meta)
+            if type(idx)=="table" and type(idx.Update)=="function" then return idx end
+            if type(M.currentController.Update)=="function" then return M.currentController end
+        end
+        return nil
+    end
+    local function TK_Fly_Hook()
+        if TK_Fly._hooked then return end
+        local ctrl=TK_Fly_FindController(); if not ctrl then return end
+        TK_Fly._controller=ctrl; TK_Fly._originalUpdate=ctrl.Update
+        local OldUpdate=ctrl.Update
+        ctrl.Update=function(self,viewInput,dt,...)
+            if TK_Fly.Enabled then
+                local svc=Combat.Service()
+                local actor=(svc and svc.Replicator and svc.Replicator.LocalActor) or (self and self._localActor)
+                if actor and actor.Alive then
+                    self.VelocityGravity=0; self.HeightState=0; self.IsGrounded=true
+                    local camCF=workspace.CurrentCamera.CFrame; local dir=Vector3.new(0,0,0)
+                    if viewInput and viewInput.Magnitude>0 then
+                        dir=dir+(camCF.LookVector*-viewInput.Y)+(camCF.RightVector*viewInput.X)
+                    end
+                    if AimUIS:IsKeyDown(Enum.KeyCode.Space) then dir=dir+Vector3.new(0,1,0) end
+                    if AimUIS:IsKeyDown(Enum.KeyCode.LeftControl) then dir=dir-Vector3.new(0,1,0) end
+                    if dir.Magnitude>0 then
+                        local speed=TK_Fly.Speed; local boost=AimUIS:IsKeyDown(Enum.KeyCode.LeftShift) and 2.5 or 1
+                        local delta=type(dt)=="number" and dt or 0.016
+                        local nextPos=(self._position or actor.Position)+(dir.Unit*speed*boost*delta)
+                        self._position=nextPos; self._lastSafePosition=nextPos
+                        actor.SimulatedPosition=nextPos; actor.Grounded=true; actor.Sprinting=false
+                        local _,yRot=workspace.CurrentCamera.CFrame:ToOrientation()
+                        actor.CFrame=CFrame.new(nextPos)*CFrame.Angles(0,yRot,0); actor.Orientation=yRot
+                    end
+                    return
+                end
+            end
+            if self._localActor then
+                if self._localActor.Rappelling then self._localActor.Rappelling=false end
+                if self.HeightState==nil then self.HeightState=0; self._localActor.HeightState=0 end
+            end
+            return OldUpdate(self,viewInput,dt,...)
+        end
+        TK_Fly._hooked=true
+    end
+    local _retry=nil
+    local function TK_Fly_Enable()
+        TK_Fly_Hook()
+        if TK_Fly._hooked then if _retry then _retry:Disconnect(); _retry=nil end; return end
+        if _retry then return end
+        _retry=AimRunService.Heartbeat:Connect(function()
+            TK_Fly_Hook(); if TK_Fly._hooked then _retry:Disconnect(); _retry=nil end
+        end)
+    end
+    local left = TKFlyPage:AddSection({Title="TK Fly", Side="Left"})
+    left:AddToggle({Text="Enable TK Fly", Flag="tk_fly_enabled", Default=false,
+        Callback=function(v) TK_Fly.Enabled=v; if v then TK_Fly_Enable() end end})
+    left:AddSlider({Text="TK Fly Speed", Flag="tk_fly_speed", Min=1, Max=500, Default=50, Rounding=1, Suffix=" studs/s",
+        Callback=function(v) TK_Fly.Speed=v end})
+end
+
+-- ── Night Vision (Mods tab, new subtab) ──
+local NVGPage = legacyPage(Tabs.Mods, modPages, 'Night Vision')
+do
+    local NVG={Enabled=false, Color="Green", _effect=nil,
+        _Colors={Green=Color3.fromRGB(112,245,65), Blue=Color3.fromRGB(165,233,255)}}
     local function NVG_Apply()
         if not NVG._effect then
             NVG._effect=Instance.new("ColorCorrectionEffect")
@@ -4597,11 +4609,17 @@ do
         NVG._effect.Brightness=0.15; NVG._effect.Contrast=0.5
         NVG._effect.Saturation=-1; NVG._effect.Enabled=NVG.Enabled
     end
-    NVGSection:AddToggle({Text="Enable NVG",Flag="nvg_enabled",Default=false,
+    local left = NVGPage:AddSection({Title="Night Vision", Side="Left"})
+    left:AddToggle({Text="Enable NVG", Flag="nvg_enabled", Default=false,
         Callback=function(v) NVG.Enabled=v; NVG_Apply() end})
-    NVGSection:AddDropdown({Text="NVG Color",Flag="nvg_color",Values={"Green","Blue"},Default="Green",
+    left:AddDropdown({Text="NVG Color", Flag="nvg_color", Values={"Green","Blue"}, Default="Green",
         Callback=function(v) NVG.Color=v; if NVG.Enabled then NVG_Apply() end end})
-    local TK_Tree={Enabled=false,Prefixes={"arb","qradbiq","oradbbig","oragedbbig"},_conn=nil}
+end
+
+-- ── Auto Remove Tree (Mods tab, new subtab) ──
+local TreePage = legacyPage(Tabs.Mods, modPages, 'Tree Remover')
+do
+    local TK_Tree={Enabled=false, Prefixes={"arb","qradbiq","oradbbig","oragedbbig"}, _conn=nil}
     local function TK_Tree_Delete()
         local marked={}
         for _,obj in pairs(workspace:GetDescendants()) do
@@ -4616,7 +4634,8 @@ do
             end
         end
     end
-    TreeSection:AddToggle({Text="Auto Remove Tree",Flag="tk_tree_enabled",Default=false,
+    local left = TreePage:AddSection({Title="Tree Remover", Side="Left"})
+    left:AddToggle({Text="Auto Remove Tree", Flag="tk_tree_enabled", Default=false,
         Callback=function(v)
             TK_Tree.Enabled=v
             if v then
@@ -4628,12 +4647,12 @@ do
                 if TK_Tree._conn then pcall(function() TK_Tree._conn:Disconnect() end); TK_Tree._conn=nil end
             end
         end})
-    TreeSection:AddButton({Text="Remove Once",Callback=function() TK_Tree_Delete(); Library:Notify("Trees removed!") end})
+    left:AddButton({Text="Remove Once", Callback=function() TK_Tree_Delete(); Library:Notify("Trees removed!") end})
 end
 
--- Vehicle Teleporter inside Vehicle Mods (VehiclePage)
+-- ── Vehicle Teleporter (Mods tab, new subtab) ──
+local VTPPage = legacyPage(Tabs.Mods, modPages, 'Veh Teleport')
 do
-    local VTPSection=VehiclePage:AddSection({Title="Teleporter",Side="Left"})
     local TK_VTP={_savedCF=nil}
     local function VT_GetVehicle()
         local svc=Combat.Service(); local localActor=svc and svc.Replicator and svc.Replicator.LocalActor
@@ -4641,9 +4660,9 @@ do
         local seat=localActor.Seat; if not seat then return nil end
         local uid=seat.UID
         if uid then
-            for _,module in ipairs(getloadedmodules()) do
-                if module.Name=="VehicleService" then
-                    local ok,vs=pcall(require,module)
+            for _,mod in ipairs(getloadedmodules()) do
+                if mod.Name=="VehicleService" then
+                    local ok,vs=pcall(require,mod)
                     if ok and type(vs)=="table" and vs.Vehicles then
                         for _,veh in pairs(vs.Vehicles) do
                             if rawget(veh,"UID")==uid then return veh end
@@ -4688,28 +4707,27 @@ do
         end)
         Library:Notify("Xe đã teleport!")
     end
-    VTPSection:AddButton({Text="Lấy Toạ Độ",Callback=function()
+    local left=VTPPage:AddSection({Title="Teleporter", Side="Left"})
+    left:AddButton({Text="Lấy Toạ Độ", Callback=function()
         pcall(function()
-            local vehicle=VT_GetVehicle()
-            if vehicle then
-                local cf=vehicle.CFrame or (vehicle.Hitbox and vehicle.Hitbox.CFrame)
+            local v=VT_GetVehicle()
+            if v then
+                local cf=v.CFrame or (v.Hitbox and v.Hitbox.CFrame)
                 if cf then TK_VTP._savedCF=cf; Library:Notify("Đã lưu toạ độ xe!"); return end
             end
             local svc=Combat.Service(); local actor=svc and svc.Replicator and svc.Replicator.LocalActor
-            if actor and actor.Character then
-                local root=actor.Character.PrimaryPart
-                if root then TK_VTP._savedCF=root.CFrame; Library:Notify("Đã lưu toạ độ nhân vật!"); return end
-            end
-            Library:Notify("Không tìm được toạ độ!")
+            if actor and actor.Character and actor.Character.PrimaryPart then
+                TK_VTP._savedCF=actor.Character.PrimaryPart.CFrame; Library:Notify("Đã lưu toạ độ nhân vật!")
+            else Library:Notify("Không tìm được toạ độ!") end
         end)
     end})
-    VTPSection:AddButton({Text="Teleport Phương Tiện",Callback=function()
+    left:AddButton({Text="Teleport Phương Tiện", Callback=function()
         pcall(function()
             if not TK_VTP._savedCF then Library:Notify("Chưa lưu toạ độ!"); return end
             VT_Teleport(TK_VTP._savedCF)
         end)
     end})
-    VTPSection:AddButton({Text="Xóa Toạ Độ",Callback=function()
+    left:AddButton({Text="Xóa Toạ Độ", Callback=function()
         pcall(function() TK_VTP._savedCF=nil; Library:Notify("Đã xóa toạ độ!") end)
     end})
 end
