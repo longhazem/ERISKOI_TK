@@ -3139,193 +3139,124 @@ do
         end
     end)
 
-    -- ── tipmobile fly + walkspeed fallback ────────────────────────────────────
-    -- BRM5 fly requires getloadedmodules → require("CharacterController").
-    -- When that module is not exposed, M.installed stays false and fly/speed
-    -- never activate. This block uses tipmobile's GC-scan approach to find the
-    -- live controller instance directly, then hooks Update the same way tipmobile
-    -- does, wired to BRM5's existing M.Fly / M.flyActive / M.FlySpeed / M.Speed
-    -- / M.SpeedValue / M.speedActive flags so all existing UI controls still work.
-    do
-        local TM = {}  -- tipmobile-style controller state for this fallback
-        TM.hooked       = false
-        TM.speedConn    = nil
-        TM.speedActive  = false
-
-        -- SpeedPenalty Heartbeat — mirrors tipmobile EnableSpeedController exactly
-        -- Uses BRM5's M.Speed / M.SpeedValue / M.speedActive flags.
-        local function TM_EnableSpeedController()
-            if TM.speedConn then return end
-            TM.speedConn = AimRunService.Heartbeat:Connect(function()
-                local actor = nil
-                local service = Combat.Service()
-                if service and service.Replicator and service.Replicator.LocalActor then
-                    actor = service.Replicator.LocalActor
-                end
-                if not actor then return end
-                local walkEnabled   = M.Speed       -- reuse BRM5 Speed flag
-                local sprintEnabled = false          -- BRM5 has no separate sprint toggle
-                if not walkEnabled and not sprintEnabled then
-                    if actor.SpeedPenalty then actor.SpeedPenalty = nil end
-                    return
-                end
-                -- Find live controller for IsSprinting
-                local controller = nil
-                for _, tbl in pairs(getgc(true)) do
-                    if type(tbl) == "table" and rawget(tbl, "IsSprinting") ~= nil
-                        and rawget(tbl, "_localActor") == actor then
-                        controller = tbl; break
-                    end
-                end
-                local isSprinting = controller and controller.IsSprinting
-                local multiplier  = 1
-                -- Walk: scale from game base 12 studs/s
-                if walkEnabled and not isSprinting then
-                    multiplier = M.SpeedValue / 12
-                elseif walkEnabled and isSprinting then
-                    multiplier = M.SpeedValue / 12  -- apply to sprint too
-                end
-                actor.SpeedPenalty = multiplier
-            end)
-            table.insert(Combat.connections, TM.speedConn)
+    -- ── tipmobile fly fallback ────────────────────────────────────────────────
+    -- Mirrors tipmobile SetupHooks exactly. Runs when M.installed is false
+    -- (native getloadedmodules→require path failed). Uses filtergc/getgc BulkScan
+    -- to find CharacterController class, hooks Update directly.
+    -- Wired to BRM5's M.flyActive / M.FlySpeed / M.modifierActive / M.Multiplier.
+    task.spawn(function()
+        -- Wait until localActor exists — controller only appears in GC after spawn
+        local localActor = nil
+        local deadline   = tick() + 30
+        while not localActor and tick() < deadline do
+            task.wait(0.5)
+            local svc = Combat.Service()
+            localActor = svc and svc.Replicator and svc.Replicator.LocalActor
         end
+        if not localActor then return end  -- gave up
 
-        -- GC scan for live controller — same as tipmobile SetupHooks
-        local function TM_FindController()
+        -- BulkScan — filtergc first (faster), fallback getgc
+        local function TM_BulkScan()
+            local ok, res = pcall(function() return filtergc("table") end)
+            if not ok or type(res) ~= "table" then
+                ok, res = pcall(function() return getgc(true) end)
+            end
+            if not ok or type(res) ~= "table" then return nil end
             local found = nil
-            -- Method 1: CharacterController from BulkScan / getgc
-            local ok, gc = pcall(function() return getgc(true) end)
-            if ok and gc then
-                for _, obj in pairs(gc) do
-                    if type(obj) == "table" then
-                        -- tipmobile: SetCFrame + SetVehicleGoal = CharacterController class
-                        if rawget(obj, "SetCFrame") and rawget(obj, "SetVehicleGoal")
-                            and rawget(obj, "Update")
-                            and (rawget(obj, "__index") == obj or not rawget(obj, "Parent")) then
+            for _, obj in pairs(res) do
+                if type(obj) == "table" then
+                    -- tipmobile primary: SetCFrame + SetVehicleGoal = CharacterController class
+                    if rawget(obj, "SetCFrame") and rawget(obj, "SetVehicleGoal") then
+                        if rawget(obj, "__index") == obj or not rawget(obj, "Parent") then
                             found = obj; break
                         end
                     end
                 end
-                -- Method 2: live controller instance with _localActor
-                if not found then
-                    local service = Combat.Service()
-                    local localActor = service and service.Replicator and service.Replicator.LocalActor
-                    if localActor then
-                        for _, obj in pairs(gc) do
-                            if type(obj) == "table"
-                                and rawget(obj, "_localActor") == localActor
-                                and rawget(obj, "Update") then
-                                found = obj; break
-                            end
-                        end
+            end
+            -- tipmobile fallback: ControllerService.Controller pattern —
+            -- find live instance with _localActor matching ours
+            if not found then
+                for _, obj in pairs(res) do
+                    if type(obj) == "table"
+                        and rawget(obj, "_localActor") == localActor
+                        and rawget(obj, "Update") then
+                        found = obj; break
                     end
                 end
             end
-            -- Method 3: metatable __index
-            if found then
-                if not rawget(found, "Update") then
-                    local meta = getmetatable(found)
-                    local idx  = meta and (meta.__index or meta)
-                    if type(idx) == "table" and idx.Update then found = idx end
-                end
+            -- resolve metatable if Update is on __index
+            if found and not rawget(found, "Update") then
+                local meta = getmetatable(found)
+                local idx  = meta and (meta.__index or meta)
+                if type(idx) == "table" and idx.Update then found = idx end
             end
             return found
         end
 
-        -- Hook Update — tipmobile fly logic verbatim, flags mapped to BRM5 M table
-        local function TM_Hook(TargetController)
-            if TM.hooked then return end
-            if not TargetController or not TargetController.Update then return end
-            TM_EnableSpeedController()
-            if not TargetController._tm_originalUpdate then
-                TargetController._tm_originalUpdate = TargetController.Update
-            end
-            local OldUpdate = TargetController._tm_originalUpdate
-            TargetController.Update = function(self, viewInput, dt, ...)
-                -- Infinite Stamina
-                if M.Stamina then
-                    pcall(function()
-                        self._exhaustStart = tick()
-                        self._exhausted    = tick() + 1
-                    end)
-                end
-                -- Fly — no M.CanMove: mirrors tipmobile exactly, localActor via Replicator or self
-                if M.flyActive then
-                    local service    = Combat.Service()
-                    local localActor = (service and service.Replicator and service.Replicator.LocalActor)
-                                       or (self and self._localActor)
-                    if not localActor or not localActor.Alive then
-                        return OldUpdate(self, viewInput, dt, ...)
-                    end
-                    self.VelocityGravity = 0
-                    self.HeightState     = 0
-                    self.IsGrounded      = true
-                    local camCF = AimCamera.CFrame
-                    local dir   = Vector3.new(0, 0, 0)
-                    if viewInput and viewInput.Magnitude > 0 then
-                        dir = dir + (camCF.LookVector * -viewInput.Y)
-                               + (camCF.RightVector  *  viewInput.X)
-                    end
-                    if AimUIS:IsKeyDown(Enum.KeyCode.Space)       then dir = dir + Vector3.new(0,  1, 0) end
-                    if AimUIS:IsKeyDown(Enum.KeyCode.LeftControl) then dir = dir + Vector3.new(0, -1, 0) end
-                    if dir.Magnitude > 0 then
-                        local flySpeedVal = tonumber(M.FlySpeed) or 40
-                        local flySprint   = AimUIS:IsKeyDown(Enum.KeyCode.LeftShift) and 2.5 or 1
-                        local modBoost    = M.modifierActive and M.Multiplier or 1
-                        local deltaTime   = type(dt) == "number" and dt or 0.016
-                        local nextPos     = (self._position or Vector3.new())
-                                            + (dir.Unit * flySpeedVal * flySprint * modBoost * deltaTime)
-                        self._position          = nextPos
-                        self._lastSafePosition  = nextPos
-                        localActor.SimulatedPosition = nextPos
-                        localActor.Grounded          = true
-                        localActor.Sprinting         = false
-                        local _, yRot = AimCamera.CFrame:ToOrientation()
-                        localActor.CFrame       = CFrame.new(nextPos) * CFrame.Angles(0, yRot, 0)
-                        localActor.Orientation  = yRot
-                    end
-                    return  -- skip native Update while flying
-                else
-                    -- Not flying — restore any rappel/height state
-                    if self._localActor then
-                        if self._localActor.Rappelling then self._localActor.Rappelling = false end
-                        if self.HeightState == nil then
-                            self.HeightState = 0
-                            if self._localActor then self._localActor.HeightState = 0 end
-                        end
-                    end
+        local TargetController = nil
+        for attempt = 1, 6 do
+            TargetController = TM_BulkScan()
+            if TargetController then break end
+            task.wait(2)
+        end
+        if not TargetController or not TargetController.Update then return end
+        if M.installed then return end  -- native hook beat us
+
+        -- Hook Update — verbatim tipmobile fly logic, BRM5 flags
+        if not TargetController._tm_originalUpdate then
+            TargetController._tm_originalUpdate = TargetController.Update
+        end
+        local OldUpdate = TargetController._tm_originalUpdate
+        TargetController.Update = function(self, viewInput, dt, ...)
+            -- If native hook installed after us, step aside
+            if M.installed then return OldUpdate(self, viewInput, dt, ...) end
+
+            if M.flyActive then
+                local svc  = Combat.Service()
+                local actor = (svc and svc.Replicator and svc.Replicator.LocalActor)
+                              or (self and self._localActor)
+                if not actor or not actor.Alive then
                     return OldUpdate(self, viewInput, dt, ...)
                 end
-            end
-            TM.hooked = true
-        end
-
-        -- Retry loop — runs every 2s until hooked.
-        -- If M.installed becomes true later (native hook succeeded),
-        -- restore original Update so there's no double-wrap.
-        AimRunService.Heartbeat:Connect(function()
-            local now = tick()
-            if TM.hooked and M.installed then
-                local ok2, gc2 = pcall(function() return getgc(true) end)
-                if ok2 and gc2 then
-                    for _, obj in pairs(gc2) do
-                        if type(obj) == "table" and rawget(obj, "_tm_originalUpdate") then
-                            obj.Update = obj._tm_originalUpdate
-                            obj._tm_originalUpdate = nil
-                        end
+                self.VelocityGravity = 0
+                self.HeightState     = 0
+                self.IsGrounded      = true
+                local camCF = AimCamera.CFrame
+                local dir   = Vector3.new(0, 0, 0)
+                if viewInput and viewInput.Magnitude > 0 then
+                    dir = dir + (camCF.LookVector * -viewInput.Y)
+                               + (camCF.RightVector *  viewInput.X)
+                end
+                if AimUIS:IsKeyDown(Enum.KeyCode.Space)       then dir = dir + Vector3.new(0,  1, 0) end
+                if AimUIS:IsKeyDown(Enum.KeyCode.LeftControl) then dir = dir + Vector3.new(0, -1, 0) end
+                if dir.Magnitude > 0 then
+                    local spd       = (tonumber(M.FlySpeed) or 40)
+                                      * (AimUIS:IsKeyDown(Enum.KeyCode.LeftShift) and 2.5 or 1)
+                                      * (M.modifierActive and (M.Multiplier or 2) or 1)
+                    local deltaTime = type(dt) == "number" and dt or 0.016
+                    local nextPos   = (self._position or Vector3.new())
+                                      + (dir.Unit * spd * deltaTime)
+                    self._position         = nextPos
+                    self._lastSafePosition = nextPos
+                    actor.SimulatedPosition = nextPos
+                    actor.Grounded          = true
+                    actor.Sprinting         = false
+                    local _, yRot = AimCamera.CFrame:ToOrientation()
+                    actor.CFrame      = CFrame.new(nextPos) * CFrame.Angles(0, yRot, 0)
+                    actor.Orientation = yRot
+                end
+                return  -- skip native Update
+            else
+                if self._localActor then
+                    if self._localActor.Rappelling then self._localActor.Rappelling = false end
+                    if self.HeightState == nil then
+                        self.HeightState = 0; self._localActor.HeightState = 0
                     end
                 end
-                TM.hooked = false
-                if TM.speedConn then TM.speedConn:Disconnect(); TM.speedConn = nil end
-                return
+                return OldUpdate(self, viewInput, dt, ...)
             end
-            if TM.hooked then return end
-            if now < (TM.nextRetry or 0) then return end
-            TM.nextRetry = now + 2
-            local ctrl = TM_FindController()
-            if ctrl then TM_Hook(ctrl) end
-        end)
-    end
+        end
+    end)
     -- ── end tipmobile fallback ────────────────────────────────────────────────
 end
 
