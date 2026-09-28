@@ -2732,10 +2732,8 @@ do
     Combat.Movement=M
     local left=MovementPage:AddSection({Title="Movement",Side="Left"})
     local right=MovementPage:AddSection({Title="Misc",Side="Right"})
-
     local flight=FlightPage:AddSection({Title="Fly",Side="Left"})
     local modifier=FlightPage:AddSection({Title="Modifier",Side="Right"})
-
     local function toggle(section,text,key)
         return section:AddToggle({Text=text,Flag="movement_"..key,Default=false,
             Callback=function(v) M[key]=v end})
@@ -3018,7 +3016,9 @@ do
                     +Vector3.yAxis*(down(Enum.KeyCode.Space)-down(Enum.KeyCode.LeftControl))
             end
             if direction.Magnitude>1 then direction=direction.Unit end
-            local speed=M.FlySpeed*(M.modifierActive and M.Multiplier or 1)
+            -- tipmobile: LeftShift sprint boost (2.5x) inside fly, independent of Modifier key
+            local shiftBoost=AimUIS:IsKeyDown(Enum.KeyCode.LeftShift) and 2.5 or 1
+            local speed=M.FlySpeed*(M.modifierActive and M.Multiplier or 1)*shiftBoost
             local target=position+direction*speed*math.clamp(dt,0,.1)
             local grounded,normal=false,Vector3.yAxis
             if not M.Noclip then
@@ -3120,6 +3120,24 @@ do
             M.speedActive=M.Speed and speed;M.flyActive=M.Fly and fly
             M.modifierActive=M.flyActive and M.Modifier and boost
         else M.speedActive=false;M.flyActive=M.Fly and M.flyActive;M.modifierActive=false end
+        -- tipmobile: SpeedPenalty layer — sets actor.SpeedPenalty as a server-readable multiplier
+        -- Works alongside ctrl.MoveSpeed; catches cases where MoveSpeed hook is bypassed
+        do
+            local service=Combat.Service()
+            local actor=service and service.Replicator and service.Replicator.LocalActor
+            if actor then
+                if M.Speed and M.speedActive then
+                    -- Walk speed: scale relative to game base of 12 studs/s
+                    actor.SpeedPenalty=M.SpeedValue/12
+                elseif M.flyActive then
+                    -- During fly, clear SpeedPenalty so server doesn't cap movement
+                    actor.SpeedPenalty=nil
+                else
+                    -- Not active — restore nil so game's own penalty system runs normally
+                    actor.SpeedPenalty=nil
+                end
+            end
+        end
         if M.NoFallDamage and not M.fallInstalled and tick()>(M.nextFallResolve or 0) then
             M.nextFallResolve=tick()+2
             local ok,err=pcall(M.InstallFallDamage)
@@ -4484,254 +4502,6 @@ end
 
 end
 
-
-
-
-
-
--- ── TK Speed (Movement tab, new subtab) ──
-local TKSpeedPage = legacyPage(Tabs.Movement, movementPages, 'TK Speed')
-do
-    local TK_Walk = { Enabled=false, Value=16, Sprint=false, SprintV=25, _conn=nil }
-    local function TK_Walk_Start()
-        if TK_Walk._conn then return end
-        TK_Walk._conn = AimRunService.Heartbeat:Connect(function()
-            if not TK_Walk.Enabled then return end
-            local svc=Combat.Service(); local actor=svc and svc.Replicator and svc.Replicator.LocalActor
-            if not actor then return end
-            local ctrl=M.currentController; local isSprinting=ctrl and ctrl.IsSprinting
-            local mult=1
-            if TK_Walk.Sprint and isSprinting then mult=TK_Walk.SprintV/16.8
-            elseif TK_Walk.Enabled and not isSprinting then mult=TK_Walk.Value/12 end
-            actor.SpeedPenalty=mult
-        end)
-    end
-    local function TK_Walk_Stop()
-        if TK_Walk._conn then pcall(function() TK_Walk._conn:Disconnect() end); TK_Walk._conn=nil end
-        local svc=Combat.Service(); local actor=svc and svc.Replicator and svc.Replicator.LocalActor
-        if actor then pcall(function() actor.SpeedPenalty=nil end) end
-    end
-    local left  = TKSpeedPage:AddSection({Title="Walk Speed", Side="Left"})
-    local right = TKSpeedPage:AddSection({Title="Sprint Speed", Side="Right"})
-    left:AddToggle({Text="Enable TK Speed", Flag="tk_walk_enabled", Default=false,
-        Callback=function(v) TK_Walk.Enabled=v; if v then TK_Walk_Start() else TK_Walk_Stop() end end})
-    left:AddSlider({Text="Walk Speed", Flag="tk_walk_value", Min=1, Max=300, Default=16, Rounding=1, Suffix=" studs/s",
-        Callback=function(v) TK_Walk.Value=v end})
-    right:AddToggle({Text="Custom Sprint", Flag="tk_walk_sprint", Default=false,
-        Callback=function(v) TK_Walk.Sprint=v end})
-    right:AddSlider({Text="Sprint Speed", Flag="tk_walk_sprint_value", Min=1, Max=300, Default=25, Rounding=1, Suffix=" studs/s",
-        Callback=function(v) TK_Walk.SprintV=v end})
-end
-
--- ── TK Fly (Movement tab, new subtab) ──
-local TKFlyPage = legacyPage(Tabs.Movement, movementPages, 'TK Fly')
-do
-    local TK_Fly = { Enabled=false, Speed=50, _hooked=false, _originalUpdate=nil, _controller=nil }
-    local function TK_Fly_FindController()
-        for _, mod in ipairs(getloadedmodules()) do
-            if mod.Name=="CharacterController" then
-                local ok,class=pcall(require,mod)
-                if ok and type(class)=="table" and type(class.Update)=="function" then return class end
-            end
-        end
-        if M.currentController then
-            local meta=getmetatable(M.currentController)
-            local idx=meta and (meta.__index or meta)
-            if type(idx)=="table" and type(idx.Update)=="function" then return idx end
-            if type(M.currentController.Update)=="function" then return M.currentController end
-        end
-        return nil
-    end
-    local function TK_Fly_Hook()
-        if TK_Fly._hooked then return end
-        local ctrl=TK_Fly_FindController(); if not ctrl then return end
-        TK_Fly._controller=ctrl; TK_Fly._originalUpdate=ctrl.Update
-        local OldUpdate=ctrl.Update
-        ctrl.Update=function(self,viewInput,dt,...)
-            if TK_Fly.Enabled then
-                local svc=Combat.Service()
-                local actor=(svc and svc.Replicator and svc.Replicator.LocalActor) or (self and self._localActor)
-                if actor and actor.Alive then
-                    self.VelocityGravity=0; self.HeightState=0; self.IsGrounded=true
-                    local camCF=workspace.CurrentCamera.CFrame; local dir=Vector3.new(0,0,0)
-                    if viewInput and viewInput.Magnitude>0 then
-                        dir=dir+(camCF.LookVector*-viewInput.Y)+(camCF.RightVector*viewInput.X)
-                    end
-                    if AimUIS:IsKeyDown(Enum.KeyCode.Space) then dir=dir+Vector3.new(0,1,0) end
-                    if AimUIS:IsKeyDown(Enum.KeyCode.LeftControl) then dir=dir-Vector3.new(0,1,0) end
-                    if dir.Magnitude>0 then
-                        local speed=TK_Fly.Speed; local boost=AimUIS:IsKeyDown(Enum.KeyCode.LeftShift) and 2.5 or 1
-                        local delta=type(dt)=="number" and dt or 0.016
-                        local nextPos=(self._position or actor.Position)+(dir.Unit*speed*boost*delta)
-                        self._position=nextPos; self._lastSafePosition=nextPos
-                        actor.SimulatedPosition=nextPos; actor.Grounded=true; actor.Sprinting=false
-                        local _,yRot=workspace.CurrentCamera.CFrame:ToOrientation()
-                        actor.CFrame=CFrame.new(nextPos)*CFrame.Angles(0,yRot,0); actor.Orientation=yRot
-                    end
-                    return
-                end
-            end
-            if self._localActor then
-                if self._localActor.Rappelling then self._localActor.Rappelling=false end
-                if self.HeightState==nil then self.HeightState=0; self._localActor.HeightState=0 end
-            end
-            return OldUpdate(self,viewInput,dt,...)
-        end
-        TK_Fly._hooked=true
-    end
-    local _retry=nil
-    local function TK_Fly_Enable()
-        TK_Fly_Hook()
-        if TK_Fly._hooked then if _retry then _retry:Disconnect(); _retry=nil end; return end
-        if _retry then return end
-        _retry=AimRunService.Heartbeat:Connect(function()
-            TK_Fly_Hook(); if TK_Fly._hooked then _retry:Disconnect(); _retry=nil end
-        end)
-    end
-    local left = TKFlyPage:AddSection({Title="TK Fly", Side="Left"})
-    left:AddToggle({Text="Enable TK Fly", Flag="tk_fly_enabled", Default=false,
-        Callback=function(v) TK_Fly.Enabled=v; if v then TK_Fly_Enable() end end})
-    left:AddSlider({Text="TK Fly Speed", Flag="tk_fly_speed", Min=1, Max=500, Default=50, Rounding=1, Suffix=" studs/s",
-        Callback=function(v) TK_Fly.Speed=v end})
-end
-
--- ── Night Vision (Mods tab, new subtab) ──
-local NVGPage = legacyPage(Tabs.Mods, modPages, 'Night Vision')
-do
-    local NVG={Enabled=false, Color="Green", _effect=nil,
-        _Colors={Green=Color3.fromRGB(112,245,65), Blue=Color3.fromRGB(165,233,255)}}
-    local function NVG_Apply()
-        if not NVG._effect then
-            NVG._effect=Instance.new("ColorCorrectionEffect")
-            NVG._effect.Name="TK_NightVision"; NVG._effect.Parent=game:GetService("Lighting")
-        end
-        NVG._effect.TintColor=NVG._Colors[NVG.Color] or NVG._Colors.Green
-        NVG._effect.Brightness=0.15; NVG._effect.Contrast=0.5
-        NVG._effect.Saturation=-1; NVG._effect.Enabled=NVG.Enabled
-    end
-    local left = NVGPage:AddSection({Title="Night Vision", Side="Left"})
-    left:AddToggle({Text="Enable NVG", Flag="nvg_enabled", Default=false,
-        Callback=function(v) NVG.Enabled=v; NVG_Apply() end})
-    left:AddDropdown({Text="NVG Color", Flag="nvg_color", Values={"Green","Blue"}, Default="Green",
-        Callback=function(v) NVG.Color=v; if NVG.Enabled then NVG_Apply() end end})
-end
-
--- ── Auto Remove Tree (Mods tab, new subtab) ──
-local TreePage = legacyPage(Tabs.Mods, modPages, 'Tree Remover')
-do
-    local TK_Tree={Enabled=false, Prefixes={"arb","qradbiq","oradbbig","oragedbbig"}, _conn=nil}
-    local function TK_Tree_Delete()
-        local marked={}
-        for _,obj in pairs(workspace:GetDescendants()) do
-            local name=obj.Name:lower()
-            for _,p in ipairs(TK_Tree.Prefixes) do
-                if name:sub(1,#p)==p then
-                    local root=obj
-                    while root.Parent and root.Parent~=workspace do root=root.Parent end
-                    if not marked[root] then marked[root]=true; pcall(function() root:Destroy() end) end
-                    break
-                end
-            end
-        end
-    end
-    local left = TreePage:AddSection({Title="Tree Remover", Side="Left"})
-    left:AddToggle({Text="Auto Remove Tree", Flag="tk_tree_enabled", Default=false,
-        Callback=function(v)
-            TK_Tree.Enabled=v
-            if v then
-                if TK_Tree._conn then return end
-                TK_Tree._conn=AimRunService.Heartbeat:Connect(function()
-                    if TK_Tree.Enabled then TK_Tree_Delete() end
-                end)
-            else
-                if TK_Tree._conn then pcall(function() TK_Tree._conn:Disconnect() end); TK_Tree._conn=nil end
-            end
-        end})
-    left:AddButton({Text="Remove Once", Callback=function() TK_Tree_Delete(); Library:Notify("Trees removed!") end})
-end
-
--- ── Vehicle Teleporter (Mods tab, new subtab) ──
-local VTPPage = legacyPage(Tabs.Mods, modPages, 'Veh Teleport')
-do
-    local TK_VTP={_savedCF=nil}
-    local function VT_GetVehicle()
-        local svc=Combat.Service(); local localActor=svc and svc.Replicator and svc.Replicator.LocalActor
-        if not localActor then return nil end
-        local seat=localActor.Seat; if not seat then return nil end
-        local uid=seat.UID
-        if uid then
-            for _,mod in ipairs(getloadedmodules()) do
-                if mod.Name=="VehicleService" then
-                    local ok,vs=pcall(require,mod)
-                    if ok and type(vs)=="table" and vs.Vehicles then
-                        for _,veh in pairs(vs.Vehicles) do
-                            if rawget(veh,"UID")==uid then return veh end
-                        end
-                    end; break
-                end
-            end
-        end
-        local ok,gc=pcall(function() return getgc(true) end)
-        if not ok or not gc then return nil end
-        for _,obj in pairs(gc) do
-            if type(obj)=="table" and rawget(obj,"Controlling")==true
-                and rawget(obj,"ComponentReplicates")~=nil
-                and (rawget(obj,"SetRPM") or rawget(obj,"_updateLightModes") or rawget(obj,"Hitbox"))
-            then return obj end
-        end
-        return nil
-    end
-    local function VT_GetSolver(vehicle)
-        local ok,gc=pcall(function() return getgc(true) end)
-        if not ok or not gc then return nil end
-        for _,obj in pairs(gc) do
-            if type(obj)=="table" and rawget(obj,"_vehicle")==vehicle and rawget(obj,"_solver") then
-                return obj._solver
-            end
-        end
-        return nil
-    end
-    local function VT_Teleport(targetCF)
-        local vehicle=VT_GetVehicle()
-        if not vehicle then Library:Notify("Hãy lên xe trước!"); return end
-        pcall(function() vehicle.CFrame=targetCF; if vehicle.Hitbox then vehicle.Hitbox.CFrame=targetCF end end)
-        pcall(function()
-            local solver=VT_GetSolver(vehicle)
-            if solver and solver.SetState then
-                solver:SetState(targetCF,Vector3.new(0,0,0),Vector3.new(0,0,0),vehicle.ComponentReplicates)
-            end
-        end)
-        pcall(function()
-            local svc=Combat.Service(); local actor=svc and svc.Replicator and svc.Replicator.LocalActor
-            if actor then actor.SimulatedPosition=targetCF.Position end
-        end)
-        Library:Notify("Xe đã teleport!")
-    end
-    local left=VTPPage:AddSection({Title="Teleporter", Side="Left"})
-    left:AddButton({Text="Lấy Toạ Độ", Callback=function()
-        pcall(function()
-            local v=VT_GetVehicle()
-            if v then
-                local cf=v.CFrame or (v.Hitbox and v.Hitbox.CFrame)
-                if cf then TK_VTP._savedCF=cf; Library:Notify("Đã lưu toạ độ xe!"); return end
-            end
-            local svc=Combat.Service(); local actor=svc and svc.Replicator and svc.Replicator.LocalActor
-            if actor and actor.Character and actor.Character.PrimaryPart then
-                TK_VTP._savedCF=actor.Character.PrimaryPart.CFrame; Library:Notify("Đã lưu toạ độ nhân vật!")
-            else Library:Notify("Không tìm được toạ độ!") end
-        end)
-    end})
-    left:AddButton({Text="Teleport Phương Tiện", Callback=function()
-        pcall(function()
-            if not TK_VTP._savedCF then Library:Notify("Chưa lưu toạ độ!"); return end
-            VT_Teleport(TK_VTP._savedCF)
-        end)
-    end})
-    left:AddButton({Text="Xóa Toạ Độ", Callback=function()
-        pcall(function() TK_VTP._savedCF=nil; Library:Notify("Đã xóa toạ độ!") end)
-    end})
-end
-
 addSubtabs('Movement', movementPages)
 addSubtabs('Mods', modPages)
 end
@@ -4814,39 +4584,136 @@ Library:OnUnload(function()
     Library.Unloaded = true
 end)
 
-
 -- UI Settings
 local FontGroup = Tabs['UI Settings']:AddLeftGroupbox('Fonts')
 FontGroup:AddDropdown('ui_font', { Text = 'UI Font', Values = Fonts.Names, Default = 'Code' }):OnChanged(function(name)
-    Library.Font = Fonts.Fonts[name]
-    Library:UpdateFonts()
+    local ok, err = pcall(Fonts.SetUI, name)
+    if not ok then
+        Library:Notify('Font could not be loaded: ' .. tostring(name))
+        warn('[Fonts] ' .. tostring(err))
+        if Options.ui_font.Value ~= Fonts.UIName then Options.ui_font:SetValue(Fonts.UIName) end
+    end
 end)
 
 local MenuGroup = Tabs['UI Settings']:AddLeftGroupbox('Menu')
 MenuGroup:AddToggle('ui_keybinds_visible',{Text='Keybinds',Default=true}):OnChanged(function(v)
-    Library.KeybindFrame.Visible = v
+    OverlaySettings.Keybinds=v
+    Library.KeybindFrame.Visible=v
 end)
 MenuGroup:AddToggle('ui_watermark_visible',{Text='Watermark',Default=true}):OnChanged(function(v)
-    Library.WatermarkFrame.Visible = v
+    OverlaySettings.Watermark=v
+    Library:SetWatermarkVisibility(v)
 end)
+
+-- I set NoUI so it does not show up in the keybinds menu
 MenuGroup:AddButton('Unload', function() Library:Unload() end)
 MenuGroup:AddLabel('Menu bind'):AddKeyPicker('MenuKeybind', { Default = 'None', NoUI = true, Text = 'Menu keybind' })
 
-Library:SetWatermark("Tokaihub | -- fps | -- ms")
-table.insert(Combat.connections, AimRunService.Heartbeat:Connect(function()
-    local fps = math.floor(1/AimRunService.Heartbeat:Wait())
-    local ping = game:GetService('Stats').Network.ServerStatsItem['Data Ping']:GetValue()
-    local pingText = ping < 1000 and tostring(math.floor(ping)) or '???'
-    Library:SetWatermark(string.format("Tokaihub | %d fps | %s ms",fps,pingText))
-end))
+Library.ToggleKeybind = Options.MenuKeybind -- Allows you to have a custom keybind for the menu
 
+-- Addons:
+-- SaveManager (Allows you to have a configuration system)
+-- ThemeManager (Allows you to have a menu theme system)
+
+-- Hand the library over to our managers
 ThemeManager:SetLibrary(Library)
 SaveManager:SetLibrary(Library)
 
+-- Ignore keys that are used by ThemeManager.
+-- (we dont want configs to save themes, do we?)
+SaveManager:IgnoreThemeSettings()
+
+-- Adds our MenuKeybind to the ignore list
+-- (do you want each config to have a different menu key? probably not.)
+SaveManager:SetIgnoreIndexes({ 'MenuKeybind' })
+
+-- use case for doing it this way:
+-- a script hub could have themes in a global folder
+-- and game configs in a separate folder per game
 ThemeManager:SetFolder('Tokaihub')
 SaveManager:SetFolder('Tokaihub/BRM5')
 
-ThemeManager:ApplyToTab(Tabs['UI Settings'])
+-- Builds our config menu on the right side of our tab
 SaveManager:BuildConfigSection(Tabs['UI Settings'])
 
+-- Builds our theme menu (with plenty of built in themes) on the left side
+-- NOTE: you can also call ThemeManager:ApplyToGroupbox to add it to a specific groupbox
+ThemeManager:ApplyToTab(Tabs['UI Settings'])
+
+-- Retain Linoria's keybind rows while giving the overlay consistent padding.
+local keybindFrame,keybindContainer=Library.KeybindFrame,Library.KeybindContainer
+refineOverlay(keybindFrame)
+local keybindInner=keybindContainer.Parent
+for _,child in ipairs(keybindInner:GetChildren()) do
+    if child:IsA("TextLabel") then
+        child.Position=UDim2.fromOffset(10,3)
+        child.Size=UDim2.new(1,-20,0,22)
+        child.TextSize=14;child.TextStrokeTransparency=1
+        child.TextYAlignment=Enum.TextYAlignment.Center
+    elseif child:IsA("Frame") and child~=keybindContainer and child.Size.Y.Offset==2 then
+        child.Position=UDim2.fromOffset(10,0)
+        child.Size=UDim2.fromOffset(24,2)
+    end
+end
+keybindContainer.Position=UDim2.fromOffset(0,29)
+keybindContainer.Size=UDim2.new(1,0,1,-35)
+local keybindPadding=keybindContainer:FindFirstChildOfClass("UIPadding") or Instance.new("UIPadding")
+keybindPadding.PaddingLeft=UDim.new(0,10);keybindPadding.PaddingRight=UDim.new(0,10)
+keybindPadding.Parent=keybindContainer
+local function resizeKeybinds()
+    local height,width=0,190
+    for _,row in ipairs(keybindContainer:GetChildren()) do
+        if row:IsA("TextLabel") and row.Visible then
+            height+=20;width=math.max(width,math.ceil(row.TextBounds.X)+24)
+        end
+    end
+    keybindFrame.Size=UDim2.fromOffset(width,math.max(36,height+35))
+end
+local function styleKeybindRow(row)
+    if not row:IsA("TextLabel") then return end
+    row.Size=UDim2.new(1,0,0,20);row.TextSize=13
+    row.TextWrapped=false;row.TextScaled=false;row.TextStrokeTransparency=1
+    row.TextYAlignment=Enum.TextYAlignment.Center
+    Library:GiveSignal(row:GetPropertyChangedSignal("TextBounds"):Connect(resizeKeybinds))
+    Library:GiveSignal(row:GetPropertyChangedSignal("Visible"):Connect(resizeKeybinds))
+end
+for _,row in ipairs(keybindContainer:GetChildren()) do styleKeybindRow(row) end
+Library:GiveSignal(keybindContainer.ChildAdded:Connect(function(row)
+    styleKeybindRow(row);resizeKeybinds()
+end))
+for _,picker in pairs(Options) do
+    if picker.Type=="KeyPicker" then
+        local update=picker.Update
+        picker.Update=function(self,...)
+            local result=table.pack(update(self,...))
+            resizeKeybinds()
+            return table.unpack(result,1,result.n)
+        end
+    end
+end
+resizeKeybinds()
+
+-- You can use SaveManager:LoadAutoloadConfig() to load a config
+-- which has been marked to be one that auto loads!
+for _,picker in pairs(Options) do
+    if picker.Type=="KeyPicker" then
+        local getState=picker.GetState
+        picker.GetState=function(self)
+            return not Library:IsTyping() and getState(self)
+        end
+        if picker.DoClick then
+            local click=picker.DoClick
+            picker.DoClick=function(self,...)
+                if Library:IsTyping() then self.Toggled=not self.Toggled;return end
+                return click(self,...)
+            end
+        end
+    end
+end
 SaveManager:LoadAutoloadConfig()
+-- Migrate the previous mouse defaults when loading an older configuration.
+for _, id in ipairs({ 'silent_key', 'trigger_key', 'rage_key' }) do
+    local picker = Options[id]
+    if picker.Value == 'MB2' then picker:SetValue({ 'None', picker.Mode }) end
+end
+Combat.ESP.Load()
