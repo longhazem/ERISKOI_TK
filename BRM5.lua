@@ -3249,8 +3249,8 @@ do
                         self._exhausted    = tick() + 1
                     end)
                 end
-                -- Fly
-                if M.flyActive and M.CanMove and M.CanMove(self) then
+                -- Fly — no M.CanMove: mirrors tipmobile exactly, localActor via Replicator or self
+                if M.flyActive then
                     local service    = Combat.Service()
                     local localActor = (service and service.Replicator and service.Replicator.LocalActor)
                                        or (self and self._localActor)
@@ -3300,11 +3300,26 @@ do
             TM.hooked = true
         end
 
-        -- Retry loop — runs every 2s until hooked; once M.installed succeeds
-        -- the native M.Install hook takes over and TM becomes dormant.
+        -- Retry loop — runs every 2s until hooked.
+        -- If M.installed becomes true later (native hook succeeded),
+        -- restore original Update so there's no double-wrap.
         AimRunService.Heartbeat:Connect(function()
-            if TM.hooked then return end
             local now = tick()
+            if TM.hooked and M.installed then
+                local ok2, gc2 = pcall(function() return getgc(true) end)
+                if ok2 and gc2 then
+                    for _, obj in pairs(gc2) do
+                        if type(obj) == "table" and rawget(obj, "_tm_originalUpdate") then
+                            obj.Update = obj._tm_originalUpdate
+                            obj._tm_originalUpdate = nil
+                        end
+                    end
+                end
+                TM.hooked = false
+                if TM.speedConn then TM.speedConn:Disconnect(); TM.speedConn = nil end
+                return
+            end
+            if TM.hooked then return end
             if now < (TM.nextRetry or 0) then return end
             TM.nextRetry = now + 2
             local ctrl = TM_FindController()
