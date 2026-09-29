@@ -1,4 +1,3 @@
-
 local repo = 'https://raw.githubusercontent.com/longhazem/ERISKOI_TK/main/'
 
 local LibrarySourceUrl = 'https://raw.githubusercontent.com/longhazem/ERISKOI_TK/main/LinoriaSrc.lua'
@@ -488,6 +487,12 @@ function Combat.Fire()
     elseif mouse1press and mouse1release then
         Combat.mouseHeld=true;mouse1press()
         task.delay(.02,function() if Combat.mouseHeld then Combat.mouseHeld=false;mouse1release() end end)
+    else
+        -- Mobile fallback: call Discharge directly (tipmobile pattern)
+        local weapon=Combat.Weapon()
+        if weapon then
+            pcall(function() weapon:Discharge() end)
+        end
     end
 end
 local keyStates={silent={},trigger={}}
@@ -2733,8 +2738,10 @@ do
     Combat.Movement=M
     local left=MovementPage:AddSection({Title="Movement",Side="Left"})
     local right=MovementPage:AddSection({Title="Misc",Side="Right"})
+
     local flight=FlightPage:AddSection({Title="Fly",Side="Left"})
     local modifier=FlightPage:AddSection({Title="Modifier",Side="Right"})
+
     local function toggle(section,text,key)
         return section:AddToggle({Text=text,Flag="movement_"..key,Default=false,
             Callback=function(v) M[key]=v end})
@@ -2908,6 +2915,21 @@ do
         return direction
     end
     function M.Install(class)
+        -- WalkSpeed controller (tipmobile: SpeedPenalty multiplier on Heartbeat)
+        if not M._speedControllerConn then
+            M._speedControllerConn = AimRunService.Heartbeat:Connect(function()
+                local svc=Combat.Service(); local actor=svc and svc.Replicator and svc.Replicator.LocalActor
+                if not actor then return end
+                if not M.Speed then
+                    if rawget(actor,"SpeedPenalty")~=nil then actor.SpeedPenalty=nil end
+                    return
+                end
+                local ctrl=M.currentController; local isSprinting=ctrl and ctrl.IsSprinting
+                local mult=isSprinting and (M.SpeedValue/16.8) or (M.SpeedValue/12)
+                actor.SpeedPenalty=mult
+            end)
+            table.insert(Combat.connections, M._speedControllerConn)
+        end
         local standing
         -- shared.import belongs to the game's module environment, not the executor.
         local inspect=(debug and debug.getupvalues) or getupvalues
@@ -2963,7 +2985,7 @@ do
             local result=table.pack(pcall(original,ctrl,M.Smoothing and 1000000 or dt,magnitude))
             for i=#saved,1,-1 do local v=saved[i];v.object[v.key]=v.value end
             if not result[1] then error(result[2],0) end
-            if M.speedActive and M.CanMove(ctrl) then ctrl.MoveSpeed=M.SpeedValue*math.clamp(magnitude,0,1) end
+            -- WalkSpeed via SpeedPenalty Heartbeat (see M.Install SpeedController below)
             return table.unpack(result,2,result.n)
         end)
         M.Wrap(class,"_decelerate",function(original,ctrl,...)
@@ -3005,37 +3027,28 @@ do
                 return table.unpack(result,2,result.n)
             end
             local camera=workspace.CurrentCamera
-            if not camera then return original(ctrl,input,dt) end
+            -- Fly logic port từ tipmobile
+            local localActor=ctrl._localActor
+            if not localActor or not localActor.Alive then return original(ctrl,input,dt) end
             M.RestoreAirSpeed();M.ResetBunny()
-            local position=ctrl._position
-            if ctrl._groundHitbox then position=ctrl._groundHitbox.CFrame:PointToWorldSpace(position) end
-            local direction=Vector3.zero
-            if not Library:IsTyping() then
-                local function down(key) return AimUIS:IsKeyDown(key) and 1 or 0 end
-                direction=camera.CFrame.LookVector*(down(Enum.KeyCode.W)-down(Enum.KeyCode.S))
-                    +camera.CFrame.RightVector*(down(Enum.KeyCode.D)-down(Enum.KeyCode.A))
-                    +Vector3.yAxis*(down(Enum.KeyCode.Space)-down(Enum.KeyCode.LeftControl))
+            ctrl.VelocityGravity=0;ctrl.HeightState=0;ctrl.IsGrounded=true
+            local camCF=workspace.CurrentCamera.CFrame
+            local dir=Vector3.zero
+            if input and input.Magnitude>0 then
+                dir=dir+(camCF.LookVector*-input.Y)+(camCF.RightVector*input.X)
             end
-            if direction.Magnitude>1 then direction=direction.Unit end
-            local speed=M.FlySpeed*(M.modifierActive and M.Multiplier or 1)
-            local target=position+direction*speed*math.clamp(dt,0,.1)
-            local grounded,normal=false,Vector3.yAxis
-            if not M.Noclip then
-                local oldPosition=ctrl._position
-                ctrl._position=position
-                local result=table.pack(pcall(ctrl._processNewPosition,ctrl,target))
-                ctrl._position=oldPosition
-                if not result[1] then error(result[2],0) end
-                target,grounded,normal=result[2],result[3],result[4]
+            if AimUIS:IsKeyDown(Enum.KeyCode.Space) then dir=dir+Vector3.yAxis end
+            if AimUIS:IsKeyDown(Enum.KeyCode.LeftControl) then dir=dir-Vector3.yAxis end
+            if dir.Magnitude>0 then
+                local speed=M.FlySpeed*(M.modifierActive and M.Multiplier or 1)
+                local boost=AimUIS:IsKeyDown(Enum.KeyCode.LeftShift) and 2.5 or 1
+                local delta=type(dt)=="number" and dt or 0.016
+                local nextPos=(ctrl._position or localActor.Position)+(dir.Unit*speed*boost*delta)
+                ctrl._position=nextPos;ctrl._lastSafePosition=nextPos
+                localActor.SimulatedPosition=nextPos;localActor.Grounded=true;localActor.Sprinting=false
+                local _,yRot=camCF:ToOrientation()
+                localActor.CFrame=CFrame.new(nextPos)*CFrame.Angles(0,yRot,0);localActor.Orientation=yRot
             end
-            ctrl._position=target;ctrl._correctedPosition=target;ctrl._groundHitbox=nil
-            ctrl.VelocityGravity=0;ctrl.MoveSpeed=0;ctrl.IsGrounded=grounded;ctrl.SlopeNormal=normal
-            ctrl.IsSliding=false;ctrl.IsSprinting=false;ctrl._lastMovement=Vector2.zero
-            local actor=ctrl._localActor
-            actor.Platform=nil;actor.SimulatedPosition=target;actor.Grounded=grounded
-            actor.ForceNextPosition=target;actor.Position=target
-            if typeof(actor.CFrame)=="CFrame" then actor.CFrame=CFrame.new(target)*actor.CFrame.Rotation end
-            actor.Sliding=false;actor.Sprinting=false
         end)
     end
     function M.InstallFallDamage()
@@ -4483,6 +4496,660 @@ end
 
 end
 
+
+
+
+
+
+-- ── TK Speed (Movement tab, new subtab) ──
+local TKSpeedPage = legacyPage(Tabs.Movement, movementPages, 'TK Speed')
+do
+    local TK_Walk = { Enabled=false, Value=16, Sprint=false, SprintV=25, _conn=nil }
+    local function TK_Walk_Start()
+        if TK_Walk._conn then return end
+        TK_Walk._conn = AimRunService.Heartbeat:Connect(function()
+            if not TK_Walk.Enabled then return end
+            local svc=Combat.Service(); local actor=svc and svc.Replicator and svc.Replicator.LocalActor
+            if not actor then return end
+            local ctrl=M.currentController; local isSprinting=ctrl and ctrl.IsSprinting
+            local mult=1
+            if TK_Walk.Sprint and isSprinting then mult=TK_Walk.SprintV/16.8
+            elseif TK_Walk.Enabled and not isSprinting then mult=TK_Walk.Value/12 end
+            actor.SpeedPenalty=mult
+        end)
+    end
+    local function TK_Walk_Stop()
+        if TK_Walk._conn then pcall(function() TK_Walk._conn:Disconnect() end); TK_Walk._conn=nil end
+        local svc=Combat.Service(); local actor=svc and svc.Replicator and svc.Replicator.LocalActor
+        if actor then pcall(function() actor.SpeedPenalty=nil end) end
+    end
+    local left  = TKSpeedPage:AddSection({Title="Walk Speed", Side="Left"})
+    local right = TKSpeedPage:AddSection({Title="Sprint Speed", Side="Right"})
+    left:AddToggle({Text="Enable TK Speed", Flag="tk_walk_enabled", Default=false,
+        Callback=function(v) TK_Walk.Enabled=v; if v then TK_Walk_Start() else TK_Walk_Stop() end end})
+    left:AddSlider({Text="Walk Speed", Flag="tk_walk_value", Min=1, Max=300, Default=16, Rounding=1, Suffix=" studs/s",
+        Callback=function(v) TK_Walk.Value=v end})
+    right:AddToggle({Text="Custom Sprint", Flag="tk_walk_sprint", Default=false,
+        Callback=function(v) TK_Walk.Sprint=v end})
+    right:AddSlider({Text="Sprint Speed", Flag="tk_walk_sprint_value", Min=1, Max=300, Default=25, Rounding=1, Suffix=" studs/s",
+        Callback=function(v) TK_Walk.SprintV=v end})
+end
+
+-- ── TK Fly (Movement tab, new subtab) ──
+local TKFlyPage = legacyPage(Tabs.Movement, movementPages, 'TK Fly')
+do
+    local TK_Fly = { Enabled=false, Speed=50, _hooked=false, _originalUpdate=nil, _controller=nil }
+    local function TK_Fly_FindController()
+        for _, mod in ipairs(getloadedmodules()) do
+            if mod.Name=="CharacterController" then
+                local ok,class=pcall(require,mod)
+                if ok and type(class)=="table" and type(class.Update)=="function" then return class end
+            end
+        end
+        if M.currentController then
+            local meta=getmetatable(M.currentController)
+            local idx=meta and (meta.__index or meta)
+            if type(idx)=="table" and type(idx.Update)=="function" then return idx end
+            if type(M.currentController.Update)=="function" then return M.currentController end
+        end
+        return nil
+    end
+    local function TK_Fly_Hook()
+        if TK_Fly._hooked then return end
+        local ctrl=TK_Fly_FindController(); if not ctrl then return end
+        TK_Fly._controller=ctrl; TK_Fly._originalUpdate=ctrl.Update
+        local OldUpdate=ctrl.Update
+        ctrl.Update=function(self,viewInput,dt,...)
+            if TK_Fly.Enabled then
+                local svc=Combat.Service()
+                local actor=(svc and svc.Replicator and svc.Replicator.LocalActor) or (self and self._localActor)
+                if actor and actor.Alive then
+                    self.VelocityGravity=0; self.HeightState=0; self.IsGrounded=true
+                    local camCF=workspace.CurrentCamera.CFrame; local dir=Vector3.new(0,0,0)
+                    if viewInput and viewInput.Magnitude>0 then
+                        dir=dir+(camCF.LookVector*-viewInput.Y)+(camCF.RightVector*viewInput.X)
+                    end
+                    if AimUIS:IsKeyDown(Enum.KeyCode.Space) then dir=dir+Vector3.new(0,1,0) end
+                    if AimUIS:IsKeyDown(Enum.KeyCode.LeftControl) then dir=dir-Vector3.new(0,1,0) end
+                    if dir.Magnitude>0 then
+                        local speed=TK_Fly.Speed; local boost=AimUIS:IsKeyDown(Enum.KeyCode.LeftShift) and 2.5 or 1
+                        local delta=type(dt)=="number" and dt or 0.016
+                        local nextPos=(self._position or actor.Position)+(dir.Unit*speed*boost*delta)
+                        self._position=nextPos; self._lastSafePosition=nextPos
+                        actor.SimulatedPosition=nextPos; actor.Grounded=true; actor.Sprinting=false
+                        local _,yRot=workspace.CurrentCamera.CFrame:ToOrientation()
+                        actor.CFrame=CFrame.new(nextPos)*CFrame.Angles(0,yRot,0); actor.Orientation=yRot
+                    end
+                    return
+                end
+            end
+            if self._localActor then
+                if self._localActor.Rappelling then self._localActor.Rappelling=false end
+                if self.HeightState==nil then self.HeightState=0; self._localActor.HeightState=0 end
+            end
+            return OldUpdate(self,viewInput,dt,...)
+        end
+        TK_Fly._hooked=true
+    end
+    local _retry=nil
+    local function TK_Fly_Enable()
+        TK_Fly_Hook()
+        if TK_Fly._hooked then if _retry then _retry:Disconnect(); _retry=nil end; return end
+        if _retry then return end
+        _retry=AimRunService.Heartbeat:Connect(function()
+            TK_Fly_Hook(); if TK_Fly._hooked then _retry:Disconnect(); _retry=nil end
+        end)
+    end
+    local left = TKFlyPage:AddSection({Title="TK Fly", Side="Left"})
+    left:AddToggle({Text="Enable TK Fly", Flag="tk_fly_enabled", Default=false,
+        Callback=function(v) TK_Fly.Enabled=v; if v then TK_Fly_Enable() end end})
+    left:AddSlider({Text="TK Fly Speed", Flag="tk_fly_speed", Min=1, Max=500, Default=50, Rounding=1, Suffix=" studs/s",
+        Callback=function(v) TK_Fly.Speed=v end})
+end
+
+-- ── Night Vision (Mods tab, new subtab) ──
+local NVGPage = legacyPage(Tabs.Mods, modPages, 'Night Vision')
+do
+    local NVG={Enabled=false, Color="Green", _effect=nil,
+        _Colors={Green=Color3.fromRGB(112,245,65), Blue=Color3.fromRGB(165,233,255)}}
+    local function NVG_Apply()
+        if not NVG._effect then
+            NVG._effect=Instance.new("ColorCorrectionEffect")
+            NVG._effect.Name="TK_NightVision"; NVG._effect.Parent=game:GetService("Lighting")
+        end
+        NVG._effect.TintColor=NVG._Colors[NVG.Color] or NVG._Colors.Green
+        NVG._effect.Brightness=0.15; NVG._effect.Contrast=0.5
+        NVG._effect.Saturation=-1; NVG._effect.Enabled=NVG.Enabled
+    end
+    local left = NVGPage:AddSection({Title="Night Vision", Side="Left"})
+    left:AddToggle({Text="Enable NVG", Flag="nvg_enabled", Default=false,
+        Callback=function(v) NVG.Enabled=v; NVG_Apply() end})
+    left:AddDropdown({Text="NVG Color", Flag="nvg_color", Values={"Green","Blue"}, Default="Green",
+        Callback=function(v) NVG.Color=v; if NVG.Enabled then NVG_Apply() end end})
+end
+
+-- ── Auto Remove Tree (Mods tab, new subtab) ──
+local TreePage = legacyPage(Tabs.Mods, modPages, 'Tree Remover')
+do
+    local TK_Tree={Enabled=false, Prefixes={"arb","qradbiq","oradbbig","oragedbbig"}, _conn=nil}
+    local function TK_Tree_Delete()
+        local marked={}
+        for _,obj in pairs(workspace:GetDescendants()) do
+            local name=obj.Name:lower()
+            for _,p in ipairs(TK_Tree.Prefixes) do
+                if name:sub(1,#p)==p then
+                    local root=obj
+                    while root.Parent and root.Parent~=workspace do root=root.Parent end
+                    if not marked[root] then marked[root]=true; pcall(function() root:Destroy() end) end
+                    break
+                end
+            end
+        end
+    end
+    local left = TreePage:AddSection({Title="Tree Remover", Side="Left"})
+    left:AddToggle({Text="Auto Remove Tree", Flag="tk_tree_enabled", Default=false,
+        Callback=function(v)
+            TK_Tree.Enabled=v
+            if v then
+                if TK_Tree._conn then return end
+                TK_Tree._conn=AimRunService.Heartbeat:Connect(function()
+                    if TK_Tree.Enabled then TK_Tree_Delete() end
+                end)
+            else
+                if TK_Tree._conn then pcall(function() TK_Tree._conn:Disconnect() end); TK_Tree._conn=nil end
+            end
+        end})
+    left:AddButton({Text="Remove Once", Callback=function() TK_Tree_Delete(); Library:Notify("Trees removed!") end})
+end
+
+-- ── Vehicle Teleporter (Mods tab, new subtab) ──
+local VTPPage = legacyPage(Tabs.Mods, modPages, 'Veh Teleport')
+do
+    local TK_VTP={_savedCF=nil}
+    local function VT_GetVehicle()
+        local svc=Combat.Service(); local localActor=svc and svc.Replicator and svc.Replicator.LocalActor
+        if not localActor then return nil end
+        local seat=localActor.Seat; if not seat then return nil end
+        local uid=seat.UID
+        if uid then
+            for _,mod in ipairs(getloadedmodules()) do
+                if mod.Name=="VehicleService" then
+                    local ok,vs=pcall(require,mod)
+                    if ok and type(vs)=="table" and vs.Vehicles then
+                        for _,veh in pairs(vs.Vehicles) do
+                            if rawget(veh,"UID")==uid then return veh end
+                        end
+                    end; break
+                end
+            end
+        end
+        local ok,gc=pcall(function() return getgc(true) end)
+        if not ok or not gc then return nil end
+        for _,obj in pairs(gc) do
+            if type(obj)=="table" and rawget(obj,"Controlling")==true
+                and rawget(obj,"ComponentReplicates")~=nil
+                and (rawget(obj,"SetRPM") or rawget(obj,"_updateLightModes") or rawget(obj,"Hitbox"))
+            then return obj end
+        end
+        return nil
+    end
+    local function VT_GetSolver(vehicle)
+        local ok,gc=pcall(function() return getgc(true) end)
+        if not ok or not gc then return nil end
+        for _,obj in pairs(gc) do
+            if type(obj)=="table" and rawget(obj,"_vehicle")==vehicle and rawget(obj,"_solver") then
+                return obj._solver
+            end
+        end
+        return nil
+    end
+    local function VT_Teleport(targetCF)
+        local vehicle=VT_GetVehicle()
+        if not vehicle then Library:Notify("Hãy lên xe trước!"); return end
+        pcall(function() vehicle.CFrame=targetCF; if vehicle.Hitbox then vehicle.Hitbox.CFrame=targetCF end end)
+        pcall(function()
+            local solver=VT_GetSolver(vehicle)
+            if solver and solver.SetState then
+                solver:SetState(targetCF,Vector3.new(0,0,0),Vector3.new(0,0,0),vehicle.ComponentReplicates)
+            end
+        end)
+        pcall(function()
+            local svc=Combat.Service(); local actor=svc and svc.Replicator and svc.Replicator.LocalActor
+            if actor then actor.SimulatedPosition=targetCF.Position end
+        end)
+        Library:Notify("Xe đã teleport!")
+    end
+    local left=VTPPage:AddSection({Title="Teleporter", Side="Left"})
+    left:AddButton({Text="Lấy Toạ Độ", Callback=function()
+        pcall(function()
+            local v=VT_GetVehicle()
+            if v then
+                local cf=v.CFrame or (v.Hitbox and v.Hitbox.CFrame)
+                if cf then TK_VTP._savedCF=cf; Library:Notify("Đã lưu toạ độ xe!"); return end
+            end
+            local svc=Combat.Service(); local actor=svc and svc.Replicator and svc.Replicator.LocalActor
+            if actor and actor.Character and actor.Character.PrimaryPart then
+                TK_VTP._savedCF=actor.Character.PrimaryPart.CFrame; Library:Notify("Đã lưu toạ độ nhân vật!")
+            else Library:Notify("Không tìm được toạ độ!") end
+        end)
+    end})
+    left:AddButton({Text="Teleport Phương Tiện", Callback=function()
+        pcall(function()
+            if not TK_VTP._savedCF then Library:Notify("Chưa lưu toạ độ!"); return end
+            VT_Teleport(TK_VTP._savedCF)
+        end)
+    end})
+    left:AddButton({Text="Xóa Toạ Độ", Callback=function()
+        pcall(function() TK_VTP._savedCF=nil; Library:Notify("Đã xóa toạ độ!") end)
+    end})
+end
+
+-- ── WalkSpeed Alt (SpeedPenalty + SprintSpeed, tipmobile pattern) ──
+local WSAltPage = legacyPage(Tabs.Movement, movementPages, 'Speed Alt')
+do
+    local WSA = {
+        Walk=false, WalkVal=16, Sprint=false, SprintVal=25,
+        _conn=nil,
+    }
+    local function WSA_Start()
+        if WSA._conn then return end
+        WSA._conn = AimRunService.Heartbeat:Connect(function()
+            if not WSA.Walk and not WSA.Sprint then return end
+            local actor = nil
+            local svc = Combat.Service()
+            if svc and svc.Replicator and svc.Replicator.LocalActor then
+                actor = svc.Replicator.LocalActor
+            elseif M.currentController and M.currentController._localActor then
+                actor = M.currentController._localActor
+            end
+            if not actor then return end
+            local ctrl = M.currentController
+            local isSprinting = ctrl and ctrl.IsSprinting
+            local mult = 1
+            if WSA.Sprint and isSprinting then
+                mult = WSA.SprintVal / 16.8
+            elseif WSA.Walk and not isSprinting then
+                mult = WSA.WalkVal / 12
+            end
+            actor.SpeedPenalty = mult
+        end)
+    end
+    local function WSA_Stop()
+        if WSA._conn then pcall(function() WSA._conn:Disconnect() end); WSA._conn = nil end
+        local svc = Combat.Service()
+        local actor = svc and svc.Replicator and svc.Replicator.LocalActor
+        if actor then pcall(function() actor.SpeedPenalty = nil end) end
+    end
+    local left  = WSAltPage:AddSection({Title='Walk Speed Alt', Side='Left'})
+    local right = WSAltPage:AddSection({Title='Sprint Speed Alt', Side='Right'})
+    left:AddToggle({Text='Enable Walk Alt', Flag='wsa_walk_enabled', Default=false,
+        Callback=function(v)
+            WSA.Walk = v
+            if v then WSA_Start() elseif not WSA.Sprint then WSA_Stop() end
+        end})
+    left:AddSlider({Text='Walk Speed', Flag='wsa_walk_val', Min=1, Max=500, Default=16, Rounding=1, Suffix=' studs/s',
+        Callback=function(v) WSA.WalkVal = v end})
+    right:AddToggle({Text='Enable Sprint Alt', Flag='wsa_sprint_enabled', Default=false,
+        Callback=function(v)
+            WSA.Sprint = v
+            if v then WSA_Start() elseif not WSA.Walk then WSA_Stop() end
+        end})
+    right:AddSlider({Text='Sprint Speed', Flag='wsa_sprint_val', Min=1, Max=500, Default=25, Rounding=1, Suffix=' studs/s',
+        Callback=function(v) WSA.SprintVal = v end})
+end
+
+-- ── CharFly Alt (tipmobile pattern: hook CharacterController.Update, LookAt-aware) ──
+local CharFlyAltPage = legacyPage(Tabs.Movement, movementPages, 'CharFly Alt')
+do
+    local CFA = {
+        Enabled = false, Speed = 50,
+        _hooked = false, _origUpdate = nil, _ctrl = nil, _retry = nil,
+    }
+    local function CFA_FindCtrl()
+        if M.currentController then return M.currentController end
+        for _, mod in ipairs(getloadedmodules()) do
+            if mod.Name == 'CharacterController' then
+                local ok, cls = pcall(require, mod)
+                if ok and type(cls) == 'table' and type(cls.Update) == 'function' then return cls end
+            end
+        end
+        return nil
+    end
+    local function CFA_Hook()
+        if CFA._hooked then return end
+        local ctrl = CFA_FindCtrl(); if not ctrl then return end
+        CFA._ctrl = ctrl
+        if not ctrl._cfaOrigUpdate then ctrl._cfaOrigUpdate = ctrl.Update end
+        local Old = ctrl._cfaOrigUpdate
+        ctrl.Update = function(self, viewInput, dt, ...)
+            if CFA.Enabled then
+                local svc = Combat.Service()
+                local localActor = (svc and svc.Replicator and svc.Replicator.LocalActor)
+                    or (self and self._localActor)
+                if localActor and localActor.Alive then
+                    -- LookAt ragebot target when active
+                    if ActorManager and ActorManager.SelectedTarget_RB then
+                        local tgt = ActorManager.SelectedTarget_RB
+                        local myPos = self._position or Vector3.zero
+                        local tp = (type(tgt) == 'table' and tgt.Position) or
+                            (typeof(tgt) == 'Instance' and tgt.Position) or nil
+                        if tp then
+                            local lookDir = (Vector3.new(tp.X, myPos.Y, tp.Z) - myPos)
+                            if lookDir.Magnitude > 0 then
+                                local yaw = math.atan2(lookDir.Unit.X, lookDir.Unit.Z)
+                                local pitch = math.atan2(tp.Y - myPos.Y,
+                                    Vector2.new(lookDir.X, lookDir.Z).Magnitude)
+                                localActor.Orientation = yaw
+                                localActor.GoalOrientation = yaw
+                                localActor.CameraX = yaw
+                                localActor.CameraY = pitch
+                                self.Orientation = yaw
+                            end
+                        end
+                    end
+                    self.VelocityGravity = 0; self.HeightState = 0; self.IsGrounded = true
+                    local camCF = workspace.CurrentCamera.CFrame
+                    local dir = Vector3.zero
+                    if viewInput and viewInput.Magnitude > 0 then
+                        dir = dir + (camCF.LookVector * -viewInput.Y) + (camCF.RightVector * viewInput.X)
+                    end
+                    if AimUIS:IsKeyDown(Enum.KeyCode.Space) then dir = dir + Vector3.new(0,1,0) end
+                    if AimUIS:IsKeyDown(Enum.KeyCode.LeftControl) then dir = dir - Vector3.new(0,1,0) end
+                    if dir.Magnitude > 0 then
+                        local spd  = CFA.Speed
+                        local boost = AimUIS:IsKeyDown(Enum.KeyCode.LeftShift) and 2.5 or 1
+                        local delta = type(dt) == 'number' and dt or 0.016
+                        local nextPos = (self._position or Vector3.zero) + (dir.Unit * spd * boost * delta)
+                        self._position = nextPos; self._lastSafePosition = nextPos
+                        localActor.SimulatedPosition = nextPos
+                        localActor.Grounded = true; localActor.Sprinting = false
+                        local _, yRot = workspace.CurrentCamera.CFrame:ToOrientation()
+                        localActor.CFrame = CFrame.new(nextPos) * CFrame.Angles(0, yRot, 0)
+                        localActor.Orientation = yRot
+                    end
+                    return
+                end
+            end
+            if self._localActor then
+                if self._localActor.Rappelling then self._localActor.Rappelling = false end
+                if self.HeightState == nil then self.HeightState = 0; self._localActor.HeightState = 0 end
+            end
+            return Old(self, viewInput, dt, ...)
+        end
+        CFA._hooked = true
+    end
+    local function CFA_TryHook()
+        CFA_Hook()
+        if CFA._hooked then
+            if CFA._retry then CFA._retry:Disconnect(); CFA._retry = nil end
+            return
+        end
+        if CFA._retry then return end
+        CFA._retry = AimRunService.Heartbeat:Connect(function()
+            CFA_Hook()
+            if CFA._hooked then CFA._retry:Disconnect(); CFA._retry = nil end
+        end)
+    end
+    local left = CharFlyAltPage:AddSection({Title='CharFly Alt', Side='Left'})
+    left:AddToggle({Text='Enable CharFly Alt', Flag='cfa_enabled', Default=false,
+        Callback=function(v)
+            CFA.Enabled = v
+            if v then CFA_TryHook() end
+        end})
+    left:AddSlider({Text='Fly Speed', Flag='cfa_speed', Min=1, Max=1000, Default=50, Rounding=1, Suffix=' studs/s',
+        Callback=function(v) CFA.Speed = v end})
+    CharFlyAltPage:AddSection({Title='Controls', Side='Right'}):AddLabel({Text=
+        'Space = Up\nLCtrl = Down\nLShift = Boost x2.5\nWASD = Direction'})
+end
+
+-- ── AuraKill Melee (tipmobile: netEncode cipher, Slash+Impact packets) ──
+local AKPage = legacyPage(Tabs.Main, {}, 'Aura Kill')
+do
+    local AK = {
+        Enabled=false, Range=20, Interval=0, BatchSize=10, TargetPart='Head',
+        _net=nil, _remote=nil, _lastFire=0, _conn=nil, _running=false,
+    }
+    local function AK_FindNet()
+        if AK._net then return AK._net end
+        if shared and type(shared.import) == 'function' then
+            local ok, net = pcall(function() return shared.import('network') end)
+            if ok and net and rawget(net,'_key') and rawget(net,'_code') then
+                AK._net = net; return net
+            end
+        end
+        local gok, gc = pcall(function() return filtergc('table') end)
+        if not gok then gok, gc = pcall(function() return getgc(true) end) end
+        if gok and gc then
+            for _, v in pairs(gc) do
+                if type(v) ~= 'table' then continue end
+                local k  = rawget(v,'_key')
+                local co = rawget(v,'_code')
+                local ev = rawget(v,'_events')
+                if type(k)=='table' and #k>=5
+                    and type(co)=='string' and co:match('^%x+%-%x+%-%x+%-%x+%-%x+$')
+                    and type(ev)=='table'
+                then
+                    local ok2 = true
+                    for _, n in ipairs(k) do if type(n)~='number' then ok2=false; break end end
+                    if ok2 then AK._net = v; return v end
+                end
+            end
+        end
+        return nil
+    end
+    local function AK_GetRemote()
+        if AK._remote and AK._remote.Parent then return AK._remote end
+        local ev = game:GetService('ReplicatedStorage'):FindFirstChild('Events')
+        if ev then
+            local re = ev:FindFirstChild('RemoteEvent')
+            if re then AK._remote=re; return re end
+        end
+        for _, v in ipairs(game:GetService('ReplicatedStorage'):GetDescendants()) do
+            if v:IsA('RemoteEvent') then AK._remote=v; return v end
+        end
+        return nil
+    end
+    local function AK_NetEncode(jsonStr, key)
+        local result = ''
+        for i = 1, #jsonStr do
+            local ki   = i % 4
+            local kval = key[ki + 1]
+            local nb   = (string.byte(jsonStr, i) - 32 + kval) % 95 + 32
+            result = result .. string.char(nb)
+        end
+        local firstByte = string.byte(jsonStr, 1)
+        for v24 = 1, key[5] do
+            local v26 = tostring(v24)
+            local v27 = firstByte - string.byte(v26, 1)
+            result = result .. string.char(v27)
+        end
+        return result
+    end
+    local function AK_Encrypt(data, net)
+        local ok, raw = pcall(function()
+            return game:GetService('HttpService'):JSONEncode(data)
+        end)
+        if not ok or not raw then return nil end
+        return AK_NetEncode(raw, net._key)
+    end
+    local function AK_GetUID(actor)
+        for _, field in ipairs({'UID','_id','Id','UUID'}) do
+            local v = rawget(actor, field)
+            if type(v)=='string' and v:match('^%x+%-%x+%-%x+%-%x+%-%x+$') then return v end
+        end
+        for k, v in pairs(actor) do
+            if type(v)=='string' and v:match('^%x+%-%x+%-%x+%-%x+%-%x+$') then return v end
+        end
+        return nil
+    end
+    local function AK_Fire(actor)
+        local net = AK_FindNet(); if not net then return false end
+        local remote = AK_GetRemote(); if not remote then return false end
+        local char = actor.Character; if not char then return false end
+        local part = char:FindFirstChild(AK.TargetPart)
+            or char:FindFirstChild('Head') or char:FindFirstChild('UpperTorso') or char.PrimaryPart
+        if not part then return false end
+        local pos = part.Position
+        local uid = AK_GetUID(actor); if not uid then return false end
+        local n = math.random(1,3)
+        local encSlash = AK_Encrypt({net._code,'InventoryAction','Slash',n}, net)
+        if encSlash then pcall(function() remote:FireServer(encSlash) end) end
+        local encImpact = AK_Encrypt(
+            {net._code,'InventoryAction','Impact',{pos.X,pos.Y,pos.Z},uid,part.Name}, net)
+        if encImpact then pcall(function() remote:FireServer(encImpact) end) end
+        return true
+    end
+    local function AK_Tick()
+        if not AK.Enabled then return end
+        local now = tick()
+        if now - AK._lastFire < AK.Interval then return end
+        local svc = Combat.Service()
+        local myActor = svc and svc.Replicator and svc.Replicator.LocalActor
+        if not myActor then return end
+        local myPos = myActor.Position or workspace.CurrentCamera.CFrame.Position
+        local candidates = {}
+        if ActorManager and ActorManager.Initialized then
+            for _, actor in ipairs(ActorManager.Enemies) do
+                if not actor or not actor.Alive or not actor.Character then continue end
+                local aPos = actor.Position
+                    or (actor.Character.PrimaryPart and actor.Character.PrimaryPart.Position)
+                if not aPos then continue end
+                local d = (aPos - myPos).Magnitude
+                if d <= AK.Range then
+                    candidates[#candidates+1] = {Actor=actor, Distance=d}
+                end
+            end
+        end
+        if #candidates == 0 then return end
+        table.sort(candidates, function(a,b) return a.Distance < b.Distance end)
+        AK._lastFire = now
+        local count = math.min(AK.BatchSize, #candidates)
+        for i = 1, count do
+            local target = candidates[i].Actor
+            task.spawn(function()
+                if not AK_Fire(target) then AK._net = nil end
+            end)
+        end
+    end
+    local function AK_Start()
+        if AK._running then return end
+        AK._running = true
+        task.spawn(AK_FindNet); task.spawn(AK_GetRemote)
+        AK._conn = AimRunService.Heartbeat:Connect(AK_Tick)
+        table.insert(Combat.connections, AK._conn)
+    end
+    local function AK_Stop()
+        AK._running = false
+        if AK._conn then pcall(function() AK._conn:Disconnect() end); AK._conn = nil end
+    end
+    getgenv().AuraKill = AK
+    local left  = AKPage:AddSection({Title='Aura Kill', Side='Left'})
+    local right = AKPage:AddSection({Title='Settings', Side='Right'})
+    left:AddToggle({Text='Enable Aura Kill', Flag='ak_enabled', Default=false,
+        Callback=function(v) AK.Enabled=v; if v then AK_Start() else AK_Stop() end end})
+    left:AddSlider({Text='Range (studs)', Flag='ak_range', Min=1, Max=100, Default=20, Rounding=0,
+        Callback=function(v) AK.Range=v end})
+    left:AddSlider({Text='Attack Rate (ms)', Flag='ak_interval', Min=0, Max=2000, Default=0, Rounding=0,
+        Callback=function(v) AK.Interval=v/1000 end})
+    left:AddSlider({Text='Batch Size', Flag='ak_batch', Min=1, Max=20, Default=10, Rounding=0,
+        Callback=function(v) AK.BatchSize=v end})
+    right:AddDropdown({Text='Target Part', Flag='ak_targetpart', Values={'Head','UpperTorso','LowerTorso'}, Default='Head',
+        Callback=function(v) AK.TargetPart=v end})
+    right:AddButton({Text='Rescan Network', Callback=function()
+        AK._net=nil; AK._remote=nil
+        task.spawn(function()
+            local net=AK_FindNet(); local re=AK_GetRemote()
+            Library:Notify(net and re
+                and ('OK! code:'..net._code:sub(1,8))
+                or 'Network scan failed', 4)
+        end)
+    end})
+end
+
+-- ── Auto Farm (requires AuraKill enabled — teleport to nearest enemy + aura) ──
+local AFPage = legacyPage(Tabs.Main, {}, 'Auto Farm')
+do
+    local AF = {
+        Enabled=false, OffsetY=-2,
+        _conn=nil, _running=false,
+    }
+    local function AF_GetTarget()
+        local svc = Combat.Service()
+        local myActor = svc and svc.Replicator and svc.Replicator.LocalActor
+        if not myActor then return nil end
+        local myPos = myActor.Position or workspace.CurrentCamera.CFrame.Position
+        local best, bestDist = nil, math.huge
+        if ActorManager and ActorManager.Initialized then
+            for _, actor in ipairs(ActorManager.Enemies) do
+                if actor and actor.Alive and actor.Character then
+                    local pos = actor.Position
+                        or (actor.Character.PrimaryPart and actor.Character.PrimaryPart.Position)
+                    if pos then
+                        local d = (pos - myPos).Magnitude
+                        if d < bestDist then bestDist=d; best=actor end
+                    end
+                end
+            end
+        end
+        return best
+    end
+    local function AF_TeleportTo(actor)
+        local svc = Combat.Service()
+        local myActor = svc and svc.Replicator and svc.Replicator.LocalActor
+        if not myActor then return end
+        local pos = actor.Position
+            or (actor.Character and actor.Character.PrimaryPart and actor.Character.PrimaryPart.Position)
+        if not pos then return end
+        local targetPos = Vector3.new(pos.X, pos.Y + AF.OffsetY, pos.Z)
+        pcall(function()
+            if M.currentController then
+                M.currentController._position = targetPos
+                M.currentController._lastSafePosition = targetPos
+            end
+            myActor.SimulatedPosition = targetPos
+            myActor.CFrame = CFrame.new(targetPos)
+        end)
+    end
+    local function AF_Tick()
+        if not AF.Enabled then return end
+        local ak = getgenv().AuraKill
+        if not (ak and ak.Enabled) then
+            Library:Notify('Bật Aura Kill trước!', 2)
+            AF.Enabled = false
+            if Library.Toggles and Library.Toggles['af_enabled'] then
+                Library.Toggles['af_enabled']:SetValue(false)
+            end
+            return
+        end
+        local target = AF_GetTarget()
+        if target then AF_TeleportTo(target) end
+    end
+    local function AF_Start()
+        if AF._running then return end
+        local ak = getgenv().AuraKill
+        if not (ak and ak.Enabled) then
+            Library:Notify('Bật Aura Kill trước!', 3)
+            return
+        end
+        AF._running = true
+        AF._conn = AimRunService.Heartbeat:Connect(AF_Tick)
+        table.insert(Combat.connections, AF._conn)
+    end
+    local function AF_Stop()
+        AF._running = false
+        if AF._conn then pcall(function() AF._conn:Disconnect() end); AF._conn = nil end
+    end
+    local left = AFPage:AddSection({Title='Auto Farm', Side='Left'})
+    left:AddToggle({Text='Enable Auto Farm', Flag='af_enabled', Default=false,
+        Callback=function(v)
+            AF.Enabled = v
+            if v then AF_Start() else AF_Stop() end
+        end})
+    left:AddSlider({Text='Y Offset', Flag='af_offset_y', Min=-10, Max=5, Default=-2, Rounding=0,
+        Callback=function(v) AF.OffsetY=v end})
+    left:AddLabel({Text='⚠ Yêu cầu Aura Kill bật trước'})
+end
+
 addSubtabs('Movement', movementPages)
 addSubtabs('Mods', modPages)
 end
@@ -4565,136 +5232,39 @@ Library:OnUnload(function()
     Library.Unloaded = true
 end)
 
+
 -- UI Settings
 local FontGroup = Tabs['UI Settings']:AddLeftGroupbox('Fonts')
 FontGroup:AddDropdown('ui_font', { Text = 'UI Font', Values = Fonts.Names, Default = 'Code' }):OnChanged(function(name)
-    local ok, err = pcall(Fonts.SetUI, name)
-    if not ok then
-        Library:Notify('Font could not be loaded: ' .. tostring(name))
-        warn('[Fonts] ' .. tostring(err))
-        if Options.ui_font.Value ~= Fonts.UIName then Options.ui_font:SetValue(Fonts.UIName) end
-    end
+    Library.Font = Fonts.Fonts[name]
+    Library:UpdateFonts()
 end)
 
 local MenuGroup = Tabs['UI Settings']:AddLeftGroupbox('Menu')
 MenuGroup:AddToggle('ui_keybinds_visible',{Text='Keybinds',Default=true}):OnChanged(function(v)
-    OverlaySettings.Keybinds=v
-    Library.KeybindFrame.Visible=v
+    Library.KeybindFrame.Visible = v
 end)
 MenuGroup:AddToggle('ui_watermark_visible',{Text='Watermark',Default=true}):OnChanged(function(v)
-    OverlaySettings.Watermark=v
-    Library:SetWatermarkVisibility(v)
+    Library.WatermarkFrame.Visible = v
 end)
-
--- I set NoUI so it does not show up in the keybinds menu
 MenuGroup:AddButton('Unload', function() Library:Unload() end)
 MenuGroup:AddLabel('Menu bind'):AddKeyPicker('MenuKeybind', { Default = 'None', NoUI = true, Text = 'Menu keybind' })
 
-Library.ToggleKeybind = Options.MenuKeybind -- Allows you to have a custom keybind for the menu
+Library:SetWatermark("Tokaihub | -- fps | -- ms")
+table.insert(Combat.connections, AimRunService.Heartbeat:Connect(function()
+    local fps = math.floor(1/AimRunService.Heartbeat:Wait())
+    local ping = game:GetService('Stats').Network.ServerStatsItem['Data Ping']:GetValue()
+    local pingText = ping < 1000 and tostring(math.floor(ping)) or '???'
+    Library:SetWatermark(string.format("Tokaihub | %d fps | %s ms",fps,pingText))
+end))
 
--- Addons:
--- SaveManager (Allows you to have a configuration system)
--- ThemeManager (Allows you to have a menu theme system)
-
--- Hand the library over to our managers
 ThemeManager:SetLibrary(Library)
 SaveManager:SetLibrary(Library)
 
--- Ignore keys that are used by ThemeManager.
--- (we dont want configs to save themes, do we?)
-SaveManager:IgnoreThemeSettings()
-
--- Adds our MenuKeybind to the ignore list
--- (do you want each config to have a different menu key? probably not.)
-SaveManager:SetIgnoreIndexes({ 'MenuKeybind' })
-
--- use case for doing it this way:
--- a script hub could have themes in a global folder
--- and game configs in a separate folder per game
 ThemeManager:SetFolder('Tokaihub')
 SaveManager:SetFolder('Tokaihub/BRM5')
 
--- Builds our config menu on the right side of our tab
+ThemeManager:ApplyToTab(Tabs['UI Settings'])
 SaveManager:BuildConfigSection(Tabs['UI Settings'])
 
--- Builds our theme menu (with plenty of built in themes) on the left side
--- NOTE: you can also call ThemeManager:ApplyToGroupbox to add it to a specific groupbox
-ThemeManager:ApplyToTab(Tabs['UI Settings'])
-
--- Retain Linoria's keybind rows while giving the overlay consistent padding.
-local keybindFrame,keybindContainer=Library.KeybindFrame,Library.KeybindContainer
-refineOverlay(keybindFrame)
-local keybindInner=keybindContainer.Parent
-for _,child in ipairs(keybindInner:GetChildren()) do
-    if child:IsA("TextLabel") then
-        child.Position=UDim2.fromOffset(10,3)
-        child.Size=UDim2.new(1,-20,0,22)
-        child.TextSize=14;child.TextStrokeTransparency=1
-        child.TextYAlignment=Enum.TextYAlignment.Center
-    elseif child:IsA("Frame") and child~=keybindContainer and child.Size.Y.Offset==2 then
-        child.Position=UDim2.fromOffset(10,0)
-        child.Size=UDim2.fromOffset(24,2)
-    end
-end
-keybindContainer.Position=UDim2.fromOffset(0,29)
-keybindContainer.Size=UDim2.new(1,0,1,-35)
-local keybindPadding=keybindContainer:FindFirstChildOfClass("UIPadding") or Instance.new("UIPadding")
-keybindPadding.PaddingLeft=UDim.new(0,10);keybindPadding.PaddingRight=UDim.new(0,10)
-keybindPadding.Parent=keybindContainer
-local function resizeKeybinds()
-    local height,width=0,190
-    for _,row in ipairs(keybindContainer:GetChildren()) do
-        if row:IsA("TextLabel") and row.Visible then
-            height+=20;width=math.max(width,math.ceil(row.TextBounds.X)+24)
-        end
-    end
-    keybindFrame.Size=UDim2.fromOffset(width,math.max(36,height+35))
-end
-local function styleKeybindRow(row)
-    if not row:IsA("TextLabel") then return end
-    row.Size=UDim2.new(1,0,0,20);row.TextSize=13
-    row.TextWrapped=false;row.TextScaled=false;row.TextStrokeTransparency=1
-    row.TextYAlignment=Enum.TextYAlignment.Center
-    Library:GiveSignal(row:GetPropertyChangedSignal("TextBounds"):Connect(resizeKeybinds))
-    Library:GiveSignal(row:GetPropertyChangedSignal("Visible"):Connect(resizeKeybinds))
-end
-for _,row in ipairs(keybindContainer:GetChildren()) do styleKeybindRow(row) end
-Library:GiveSignal(keybindContainer.ChildAdded:Connect(function(row)
-    styleKeybindRow(row);resizeKeybinds()
-end))
-for _,picker in pairs(Options) do
-    if picker.Type=="KeyPicker" then
-        local update=picker.Update
-        picker.Update=function(self,...)
-            local result=table.pack(update(self,...))
-            resizeKeybinds()
-            return table.unpack(result,1,result.n)
-        end
-    end
-end
-resizeKeybinds()
-
--- You can use SaveManager:LoadAutoloadConfig() to load a config
--- which has been marked to be one that auto loads!
-for _,picker in pairs(Options) do
-    if picker.Type=="KeyPicker" then
-        local getState=picker.GetState
-        picker.GetState=function(self)
-            return not Library:IsTyping() and getState(self)
-        end
-        if picker.DoClick then
-            local click=picker.DoClick
-            picker.DoClick=function(self,...)
-                if Library:IsTyping() then self.Toggled=not self.Toggled;return end
-                return click(self,...)
-            end
-        end
-    end
-end
 SaveManager:LoadAutoloadConfig()
--- Migrate the previous mouse defaults when loading an older configuration.
-for _, id in ipairs({ 'silent_key', 'trigger_key', 'rage_key' }) do
-    local picker = Options[id]
-    if picker.Value == 'MB2' then picker:SetValue({ 'None', picker.Mode }) end
-end
-Combat.ESP.Load()
