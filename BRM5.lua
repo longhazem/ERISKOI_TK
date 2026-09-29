@@ -4487,468 +4487,319 @@ addSubtabs('Mods', modPages)
 end
 
 
--- ================================================================
--- TOKAIHUB PORT: Tính năng từ tipmobile → BRM5 (ERISKOI)
--- Port: Highlight ESP nâng cấp, Zombie ESP theo loại,
---       Aura Kill, Auto Farm, Auto Lockpick, Third Person,
---       Vehicle Teleporter, Night Vision+, Bullet Tracer,
---       Hit Sound, Anti Fall, Auto Remove Tree
--- ================================================================
+-- =================================================================
+-- TOKAIHUB PORT v3 — tipmobile → BRM5 ERISKOI
+-- Chèn VÀO ĐÚNG cấu trúc BRM5: legacyPage + AddSection
+-- Services: Combat.Service(), Combat.Sync(), Combat.actors
+-- =================================================================
 
--- ── Shared vars cho port block ──────────────────────────────────
-local _PORT = {
-    Highlight = { ZombieOnly=false, FillTransp=0.75, OutlineTransp=0.0, VisibleOnly=false, PerType=false },
-    ZombieFilter = { [1]=true,[2]=true,[3]=true,[4]=true,[5]=true,[6]=true,[7]=true },
-    ZombieColors = {
-        [1]=Color3.fromRGB(148,74,0),   -- Crippled
-        [2]=Color3.fromRGB(255,255,0),  -- Slow
-        [3]=Color3.fromRGB(255,0,0),    -- Normal
-        [4]=Color3.fromRGB(148,0,255),  -- Sprinter
-        [5]=Color3.fromRGB(255,100,0),  -- Tank
-        [6]=Color3.fromRGB(200,0,255),  -- Screamer
-        [7]=Color3.fromRGB(255,50,50),  -- Bomber
-    },
-    AuraKill = { Enabled=false, Range=20, Interval=0, BatchSize=10, TargetPart="Head",
-        _net=nil, _remote=nil, _lastFire=0, _connection=nil, _running=false },
-    AutoFarm  = { Enabled=false, OffsetY=-2, _connection=nil, _running=false },
-    Lockpick  = { Enabled=false, _connection=nil, _ctrl=nil, _nextResolve=0, _lastGCScan=0, _inputSvc=nil },
-    ThirdPerson = { Enabled=false, _connection=nil, _lastScan=0 },
-    VehicleTeleport = { _savedCF=nil },
-    NVG = { Brightness=0.15, Contrast=0.5, Saturation=-1, Effect=nil, Fullbright=nil },
-    BulletTracer = { Enabled=false, Lifetime=3, Color=Color3.fromRGB(255,200,50),
-        Transparency=0.3, Width=0.05, FadeOut=true, _parts={} },
-    HitSound = { Enabled=false, Volume=0.5, _sound=nil },
-    AntiFall = { Enabled=false },
-    AutoTree  = { Enabled=false, _connection=nil },
+-- ── Notifier compat ─────────────────────────────────────────────
+local function Notify(msg, dur)
+    pcall(function() Library:Notify(msg, dur or 3) end)
+end
+
+-- ── Helpers lấy services qua BRM5 Combat object ─────────────────
+local function GetReplicator()
+    local c = Combat.Service(); return c and c.Replicator
+end
+local function GetLocalActor()
+    local r = GetReplicator(); return r and r.LocalActor
+end
+
+-- =================================================================
+-- BLOCK 1: AURA KILL — port nguyên xi từ tipmobile
+-- =================================================================
+do
+local AuraKill = {
+    Enabled=false, Range=20, Interval=0, BatchSize=10, TargetPart="Head",
+    _net=nil, _remote=nil, _lastFire=0, _connection=nil, _running=false,
 }
-getgenv()._TK_PORT = _PORT
-
--- Resolve ReplicatorService từ Combat (BRM5 dùng AimRunService, AimLocalPlayer, AimCamera)
-local function PORT_GetReplicator()
-    local c = Combat.Service()
-    return c and c.Replicator
-end
-local function PORT_GetLocalActor()
-    local r = PORT_GetReplicator()
-    return r and r.LocalActor
-end
-local function PORT_GetActorList()
-    local r = PORT_GetReplicator()
-    return r and r.Actors or {}
-end
-
--- ── 1. HIGHLIGHT ESP NÂNG CẤP ───────────────────────────────────
--- BRM5 dùng Sense (ESP engine riêng) với ChamObject dùng Highlight
--- Tao wrap lên layer bổ sung: tạo Highlight riêng theo _PORT.Highlight config
-local _PORT_highlights = {} -- [actor] = Highlight instance
-
-local function PORT_CreateHighlight(actor, color)
-    if not actor or not actor.Character or not actor.Character.Parent then return nil end
-    local h = Instance.new("Highlight")
-    h.FillColor            = color
-    h.FillTransparency     = _PORT.Highlight.FillTransp
-    h.OutlineColor         = color
-    h.OutlineTransparency  = _PORT.Highlight.OutlineTransp
-    pcall(function()
-        h.DepthMode = _PORT.Highlight.VisibleOnly
-            and Enum.HighlightDepthMode.Occluded
-            or  Enum.HighlightDepthMode.AlwaysOnTop
-    end)
-    h.Parent = actor.Character
-    return h
-end
-
-local function PORT_GetZombieColor(actor)
-    local ability = actor.Health and type(actor.Health)=="table" and actor.Health.Ability
-    if ability and _PORT.ZombieColors[ability] then return _PORT.ZombieColors[ability] end
-    return Color3.fromRGB(255,0,0)
-end
-
-local function PORT_GetActorColor(actor)
-    local kind = Combat.Kind(actor)
-    if kind == "Zombies" then
-        if _PORT.Highlight.PerType then return PORT_GetZombieColor(actor) end
-        return Color3.fromRGB(255,0,0)
-    elseif kind == "NPCs" then return Color3.fromRGB(255,255,0)
-    elseif kind == "Players" then return Color3.fromRGB(255,165,0)
-    end
-    return Color3.fromRGB(255,255,255)
-end
-
-local function PORT_ShouldShowHighlight(actor)
-    local kind = Combat.Kind(actor)
-    if not kind then return false end
-    if _PORT.Highlight.ZombieOnly and kind ~= "Zombies" then return false end
-    -- zombie filter by ability
-    if kind == "Zombies" then
-        local ability = actor.Health and type(actor.Health)=="table" and actor.Health.Ability
-        if ability and _PORT.ZombieFilter[ability] == false then return false end
-    end
-    return Combat.IsAlive(actor)
-end
-
--- Heartbeat: sync highlights với actor list
-local _portHLConn = AimRunService.Heartbeat:Connect(function()
-    if not Sense._highlightPortEnabled then
-        -- Cleanup tất cả highlights nếu feature tắt
-        for actor, h in pairs(_PORT_highlights) do
-            pcall(function() h:Destroy() end)
-            _PORT_highlights[actor] = nil
-        end
-        return
-    end
-
-    local registry = PORT_GetActorList()
-    local alive = {}
-
-    for uid, actor in pairs(registry) do
-        if PORT_ShouldShowHighlight(actor) then
-            alive[actor] = true
-            local h = _PORT_highlights[actor]
-            local color = PORT_GetActorColor(actor)
-            if not h or not h.Parent or (actor.Character and h.Parent ~= actor.Character) then
-                if h then pcall(function() h:Destroy() end) end
-                _PORT_highlights[actor] = PORT_CreateHighlight(actor, color)
-            else
-                -- update color
-                h.FillColor   = color
-                h.OutlineColor = color
-                h.FillTransparency = _PORT.Highlight.FillTransp
-                h.OutlineTransparency = _PORT.Highlight.OutlineTransp
-                pcall(function()
-                    h.DepthMode = _PORT.Highlight.VisibleOnly
-                        and Enum.HighlightDepthMode.Occluded
-                        or  Enum.HighlightDepthMode.AlwaysOnTop
-                end)
-            end
-        end
-    end
-
-    -- Remove highlights cho actor đã chết/đi
-    for actor, h in pairs(_PORT_highlights) do
-        if not alive[actor] then
-            pcall(function() h:Destroy() end)
-            _PORT_highlights[actor] = nil
-        end
-    end
-end)
-table.insert(Combat.connections, _portHLConn)
-
--- ── 2. AURA KILL ENGINE (port đầy đủ từ tipmobile) ──────────────
-local AK = _PORT.AuraKill
-
 local function AK_FindNet()
-    if AK._net then return AK._net end
+    if AuraKill._net then return AuraKill._net end
     if shared and type(shared.import)=="function" then
-        local ok, net = pcall(function() return shared.import("network") end)
-        if ok and net and rawget(net,"_key") and rawget(net,"_code") then AK._net=net; return net end
+        local ok,net=pcall(function() return shared.import("network") end)
+        if ok and net and rawget(net,"_key") and rawget(net,"_code") then AuraKill._net=net; return net end
     end
-    local gok, gc = pcall(function() return filtergc("table") end)
-    if not gok then gok, gc = pcall(function() return getgc(true) end) end
-    if gok and gc then
-        for _, v in pairs(gc) do
+    local ok,gc=pcall(function() return filtergc("table") end)
+    if not ok then ok,gc=pcall(function() return getgc(true) end) end
+    if ok and gc then
+        for _,v in pairs(gc) do
             if type(v)~="table" then continue end
             local k=rawget(v,"_key"); local co=rawget(v,"_code"); local ev=rawget(v,"_events")
             if type(k)=="table" and #k>=5 and type(co)=="string" and co:match("^%x+%-%x+%-%x+%-%x+%-%x+$") and type(ev)=="table" then
-                local allN=true; for _,n in ipairs(k) do if type(n)~="number" then allN=false;break end end
-                if allN then AK._net=v; return v end
+                local ok2=true; for _,n in ipairs(k) do if type(n)~="number" then ok2=false;break end end
+                if ok2 then AuraKill._net=v; return v end
             end
         end
     end
     return nil
 end
-
 local function AK_GetRemote()
-    if AK._remote and AK._remote.Parent then return AK._remote end
-    local ev = game:GetService("ReplicatedStorage"):FindFirstChild("Events")
-    if ev then local re=ev:FindFirstChild("RemoteEvent"); if re then AK._remote=re; return re end end
+    if AuraKill._remote and AuraKill._remote.Parent then return AuraKill._remote end
+    local ev=game:GetService("ReplicatedStorage"):FindFirstChild("Events")
+    if ev then local re=ev:FindFirstChild("RemoteEvent"); if re then AuraKill._remote=re; return re end end
     for _,v in ipairs(game:GetService("ReplicatedStorage"):GetDescendants()) do
-        if v:IsA("RemoteEvent") then AK._remote=v; return v end
+        if v:IsA("RemoteEvent") then AuraKill._remote=v; return v end
     end
     return nil
 end
-
-local function AK_NetEncode(jsonStr, key)
-    local result=""
-    for i=1,#jsonStr do
-        local ki=i%4; local kval=key[ki+1]
-        local nb=(string.byte(jsonStr,i)-32+kval)%95+32
-        result=result..string.char(nb)
+local function AK_NetEncode(s,key)
+    local r=""
+    for i=1,#s do
+        local nb=(string.byte(s,i)-32+key[(i%4)+1])%95+32; r=r..string.char(nb)
     end
-    local firstByte=string.byte(jsonStr,1)
-    for v24=1,key[5] do
-        local v26=tostring(v24); local v27=firstByte-string.byte(v26,1)
-        result=result..string.char(v27)
-    end
-    return result
+    local fb=string.byte(s,1)
+    for i=1,key[5] do r=r..string.char(fb-string.byte(tostring(i),1)) end
+    return r
 end
-
-local function AK_Encrypt(data, net)
-    local hs=game:GetService("HttpService")
-    local ok,raw=pcall(function() return hs:JSONEncode(data) end)
+local function AK_Encrypt(data,net)
+    local ok,raw=pcall(function() return game:GetService("HttpService"):JSONEncode(data) end)
     if not ok or not raw then return nil end
-    return AK_NetEncode(raw, net._key)
+    return AK_NetEncode(raw,net._key)
 end
-
 local function AK_GetUID(actor)
-    for _,field in ipairs({"UID","_id","Id","UUID"}) do
-        local v=rawget(actor,field)
+    for _,f in ipairs({"UID","_id","Id","UUID"}) do
+        local v=rawget(actor,f)
         if type(v)=="string" and v:match("^%x+%-%x+%-%x+%-%x+%-%x+$") then return v end
     end
-    for k,v in pairs(actor) do
+    for _,v in pairs(actor) do
         if type(v)=="string" and v:match("^%x+%-%x+%-%x+%-%x+%-%x+$") then return v end
     end
     return nil
 end
-
 local function AK_Fire(actor)
     local net=AK_FindNet(); if not net then return false end
     local remote=AK_GetRemote(); if not remote then return false end
     local char=actor.Character; if not char then return false end
-    local part=char:FindFirstChild(AK.TargetPart) or char:FindFirstChild("Head") or char:FindFirstChild("UpperTorso") or char.PrimaryPart
+    local part=char:FindFirstChild(AuraKill.TargetPart) or char:FindFirstChild("Head") or char.PrimaryPart
     if not part then return false end
-    local pos=part.Position
-    local uid=AK_GetUID(actor); if not uid then return false end
-    local n=math.random(1,3)
-    local encSlash=AK_Encrypt({net._code,"InventoryAction","Slash",n},net)
-    if encSlash then pcall(function() remote:FireServer(encSlash) end) end
-    local encImpact=AK_Encrypt({net._code,"InventoryAction","Impact",{pos.X,pos.Y,pos.Z},uid,part.Name},net)
-    if encImpact then pcall(function() remote:FireServer(encImpact) end) end
+    local pos=part.Position; local uid=AK_GetUID(actor); if not uid then return false end
+    local enc1=AK_Encrypt({net._code,"InventoryAction","Slash",math.random(1,3)},net)
+    if enc1 then pcall(function() remote:FireServer(enc1) end) end
+    local enc2=AK_Encrypt({net._code,"InventoryAction","Impact",{pos.X,pos.Y,pos.Z},uid,part.Name},net)
+    if enc2 then pcall(function() remote:FireServer(enc2) end) end
     return true
 end
-
 local function AK_Tick()
-    if not AK.Enabled then return end
-    local now=tick()
-    if now-AK._lastFire < AK.Interval then return end
-    local myActor=PORT_GetLocalActor(); if not myActor then return end
-    local myPos=myActor.Position or AimCamera.CFrame.Position
+    if not AuraKill.Enabled then return end
+    local now=tick(); if now-AuraKill._lastFire<AuraKill.Interval then return end
+    local me=GetLocalActor(); if not me then return end
+    local myPos=me.Position or AimCamera.CFrame.Position
+    Combat.Sync()
     local candidates={}
-    Combat.Sync()
-    for _,actor in ipairs(Combat.actors) do
-        if not Combat.IsAlive(actor) or not actor.Character then continue end
-        local kind=Combat.Kind(actor); if not kind then continue end
-        local aPos=actor.Position
-        if not aPos then continue end
-        local d=(aPos-myPos).Magnitude
-        if d<=AK.Range then candidates[#candidates+1]={Actor=actor,Distance=d} end
-    end
-    if #candidates==0 then return end
-    table.sort(candidates,function(a,b) return a.Distance<b.Distance end)
-    AK._lastFire=now
-    local count=math.min(AK.BatchSize,#candidates)
-    for i=1,count do
-        local target=candidates[i].Actor
-        task.spawn(function()
-            if not AK_Fire(target) then AK._net=nil end
-        end)
-    end
-end
-
-local function AK_Start()
-    if AK._running then return end
-    AK._running=true
-    task.spawn(AK_FindNet); task.spawn(AK_GetRemote)
-    AK._connection=AimRunService.Heartbeat:Connect(AK_Tick)
-    table.insert(Combat.connections, AK._connection)
-    print("[AuraKill] Started")
-end
-local function AK_Stop()
-    AK._running=false
-    if AK._connection then pcall(function() AK._connection:Disconnect() end); AK._connection=nil end
-end
-getgenv().AuraKill_PORT = AK
-
--- ── 3. AUTO FARM ────────────────────────────────────────────────
-local AF = _PORT.AutoFarm
-local function AF_GetTarget()
-    local myActor=PORT_GetLocalActor(); if not myActor then return nil end
-    local myPos=myActor.Position or AimCamera.CFrame.Position
-    local best,bestDist=nil,math.huge
-    Combat.Sync()
     for _,actor in ipairs(Combat.actors) do
         if Combat.IsAlive(actor) and actor.Character and actor.Position then
             local d=(actor.Position-myPos).Magnitude
-            if d<bestDist then bestDist=d; best=actor end
+            if d<=AuraKill.Range then candidates[#candidates+1]={A=actor,D=d} end
+        end
+    end
+    if #candidates==0 then return end
+    table.sort(candidates,function(a,b) return a.D<b.D end)
+    AuraKill._lastFire=now
+    for i=1,math.min(AuraKill.BatchSize,#candidates) do
+        task.spawn(function() if not AK_Fire(candidates[i].A) then AuraKill._net=nil end end)
+    end
+end
+function AuraKill.Start()
+    if AuraKill._running then return end
+    AuraKill._running=true
+    task.spawn(AK_FindNet); task.spawn(AK_GetRemote)
+    AuraKill._connection=AimRunService.Heartbeat:Connect(AK_Tick)
+    table.insert(Combat.connections,AuraKill._connection)
+end
+function AuraKill.Stop()
+    AuraKill._running=false
+    if AuraKill._connection then pcall(function() AuraKill._connection:Disconnect() end); AuraKill._connection=nil end
+end
+getgenv().TK_AuraKill=AuraKill
+
+-- UI: thêm vào Tab.Main
+local AKLeft=Tabs.Main:AddLeftGroupbox("Aura Kill")
+AKLeft:AddToggle("ak_enabled",{Text="Enable Aura Kill",Default=false}):OnChanged(function(v)
+    AuraKill.Enabled=v; if v then AuraKill.Start() else AuraKill.Stop() end
+end)
+AKLeft:AddSlider("ak_range",{Text="Range (studs)",Default=20,Min=1,Max=200,Rounding=0}):OnChanged(function(v) AuraKill.Range=v end)
+AKLeft:AddSlider("ak_interval",{Text="Rate (ms)",Default=0,Min=0,Max=2000,Rounding=0}):OnChanged(function(v) AuraKill.Interval=v/1000 end)
+AKLeft:AddSlider("ak_batch",{Text="Batch Size",Default=10,Min=1,Max=20,Rounding=0}):OnChanged(function(v) AuraKill.BatchSize=v end)
+AKLeft:AddDropdown("ak_part",{Text="Target Part",Default="Head",Values={"Head","UpperTorso","LowerTorso"}}):OnChanged(function(v) AuraKill.TargetPart=v end)
+AKLeft:AddButton("Rescan Network",function()
+    AuraKill._net=nil; AuraKill._remote=nil
+    task.spawn(function()
+        local net=AK_FindNet(); local re=AK_GetRemote()
+        Notify(net and re and ("AK OK: "..net._code:sub(1,8)) or "AK: Not found",4)
+    end)
+end)
+print("[AuraKill] Loaded")
+end
+
+-- =================================================================
+-- BLOCK 2: AUTO FARM
+-- =================================================================
+do
+local AutoFarm={Enabled=false,OffsetY=-2,_conn=nil,_running=false}
+getgenv().TK_AutoFarm=AutoFarm
+local function AF_GetTarget()
+    local me=GetLocalActor(); if not me then return nil end
+    local myPos=me.Position; if not myPos then return nil end
+    local best,bestD=nil,math.huge
+    Combat.Sync()
+    for _,a in ipairs(Combat.actors) do
+        if Combat.IsAlive(a) and a.Position then
+            local d=(a.Position-myPos).Magnitude
+            if d<bestD then bestD=d; best=a end
         end
     end
     return best
 end
-local function AF_TeleportTo(actor)
-    local myActor=PORT_GetLocalActor(); if not myActor then return end
-    local pos=actor.Position; if not pos then return end
-    local targetPos=Vector3.new(pos.X, pos.Y+AF.OffsetY, pos.Z)
-    pcall(function()
-        myActor.SimulatedPosition=targetPos; myActor.Position=targetPos
-        if myActor.Character and myActor.Character.PrimaryPart then
-            myActor.Character.PrimaryPart.CFrame=CFrame.new(targetPos)
-        end
-        myActor.ForceNextPosition=targetPos
-    end)
-end
 local function AF_Tick()
-    if not AF.Enabled then return end
-    if not (getgenv().AuraKill_PORT and getgenv().AuraKill_PORT.Enabled) then
-        AF.Enabled=false; return
+    if not AutoFarm.Enabled then return end
+    if not (getgenv().TK_AuraKill and getgenv().TK_AuraKill.Enabled) then
+        AutoFarm.Enabled=false; Notify("Bật Aura Kill trước!",2); return
     end
-    local target=AF_GetTarget()
-    if target then AF_TeleportTo(target) end
-end
-local function AF_Start()
-    if AF._running then return end
-    if not (getgenv().AuraKill_PORT and getgenv().AuraKill_PORT.Enabled) then
-        Library:Notify("Bật Aura Kill trước!", 3); return
-    end
-    AF._running=true
-    AF._connection=AimRunService.Heartbeat:Connect(AF_Tick)
-    table.insert(Combat.connections, AF._connection)
-end
-local function AF_Stop()
-    AF._running=false
-    if AF._connection then pcall(function() AF._connection:Disconnect() end); AF._connection=nil end
-end
-
--- ── 4. AUTO LOCKPICK ────────────────────────────────────────────
-local ALP = _PORT.Lockpick
-local function ALP_FindController()
-    if not getloadedmodules then return nil end
-    for _,m in ipairs(getloadedmodules()) do
-        if m.Name=="LockpickController" or m.Name=="Lockpick" or m.Name=="LockPick" then
-            local ok,ctrl=pcall(require,m)
-            if ok and type(ctrl)=="table" then return ctrl end
-        end
-    end
-    return nil
-end
-local function ALP_FindActiveState()
-    local ok,gc=pcall(function() return filtergc("table") end)
-    if not ok then ok,gc=pcall(function() return getgc(true) end) end
-    if not ok then return nil end
-    for _,v in pairs(gc) do
-        if type(v)=="table" then
-            local prog=rawget(v,"_progress") or rawget(v,"_pickProgress") or rawget(v,"Progress")
-            local activ=rawget(v,"_active") or rawget(v,"_pickActive") or rawget(v,"Active")
-            if type(prog)=="number" and activ==true then return v end
-        end
-    end
-    return nil
-end
-local function ALP_TryComplete(obj)
-    for _,name in ipairs({"_complete","Complete","_onComplete","OnComplete","_finish","Finish"}) do
-        local fn=rawget(obj,name)
-        if type(fn)=="function" then pcall(fn,obj); return true end
-    end
-    return false
-end
-local function ALP_Tick(dt)
-    if not ALP.Enabled then return end
-    local now=tick()
-    if not ALP._ctrl and now>ALP._nextResolve then
-        ALP._nextResolve=now+3; ALP._ctrl=ALP_FindController()
-    end
-    if ALP._ctrl then
-        local ctrl=ALP._ctrl
-        local isActive=rawget(ctrl,"_active") or rawget(ctrl,"_pickActive") or rawget(ctrl,"Active")
-        if isActive==true then
-            local maxProg=rawget(ctrl,"_maxProgress") or rawget(ctrl,"MaxProgress") or 1
-            if rawget(ctrl,"_progress") then ctrl._progress=maxProg end
-            if rawget(ctrl,"_pickProgress") then ctrl._pickProgress=maxProg end
-            local pins=rawget(ctrl,"_pins") or rawget(ctrl,"Pins")
-            if type(pins)=="table" then
-                for _,pin in pairs(pins) do
-                    if type(pin)=="table" then
-                        if rawget(pin,"_solved") then pin._solved=true end
-                        if rawget(pin,"_set") then pin._set=true end
-                        if rawget(pin,"Solved") then pin.Solved=true end
-                        if rawget(pin,"_position") then pin._position=rawget(pin,"_target") or 1 end
-                    end
-                end
-            end
-            ALP_TryComplete(ctrl); return
-        end
-    end
-    if now-ALP._lastGCScan>0.1 then
-        ALP._lastGCScan=now
-        local state=ALP_FindActiveState()
-        if state then
-            local maxProg=rawget(state,"_maxProgress") or rawget(state,"MaxProgress") or 1
-            if rawget(state,"_progress") then state._progress=maxProg end
-            if rawget(state,"_pickProgress") then state._pickProgress=maxProg end
-            local pins=rawget(state,"_pins") or rawget(state,"Pins")
-            if type(pins)=="table" then
-                for _,pin in pairs(pins) do
-                    if type(pin)=="table" then
-                        if rawget(pin,"_solved") then pin._solved=true end
-                        if rawget(pin,"_set") then pin._set=true end
-                        if rawget(pin,"Solved") then pin.Solved=true end
-                        if rawget(pin,"_position") then pin._position=rawget(pin,"_target") or 1 end
-                    end
-                end
-            end
-            ALP_TryComplete(state)
-        end
-    end
-end
-local function ALP_Start()
-    if ALP._connection then return end
-    ALP._ctrl=nil; ALP._inputSvc=nil; ALP._nextResolve=0
-    ALP._connection=AimRunService.Heartbeat:Connect(function(dt)
-        local ok,err=pcall(ALP_Tick,dt)
-        if not ok then ALP._ctrl=nil; ALP._nextResolve=0 end
+    local target=AF_GetTarget(); if not target or not target.Position then return end
+    local me=GetLocalActor(); if not me then return end
+    local tp=Vector3.new(target.Position.X, target.Position.Y+AutoFarm.OffsetY, target.Position.Z)
+    pcall(function()
+        me.SimulatedPosition=tp; me.Position=tp
+        if me.Character and me.Character.PrimaryPart then me.Character.PrimaryPart.CFrame=CFrame.new(tp) end
     end)
-    table.insert(Combat.connections, ALP._connection)
 end
-local function ALP_Stop()
-    if ALP._connection then pcall(function() ALP._connection:Disconnect() end); ALP._connection=nil end
-    ALP._ctrl=nil
+local AFRight=Tabs.Main:AddRightGroupbox("Auto Farm")
+AFRight:AddToggle("af_enabled",{Text="Enable Auto Farm",Default=false}):OnChanged(function(v)
+    AutoFarm.Enabled=v
+    if v and not AutoFarm._running then
+        AutoFarm._running=true
+        AutoFarm._conn=AimRunService.Heartbeat:Connect(AF_Tick)
+        table.insert(Combat.connections,AutoFarm._conn)
+    elseif not v then
+        AutoFarm._running=false
+        if AutoFarm._conn then pcall(function() AutoFarm._conn:Disconnect() end); AutoFarm._conn=nil end
+    end
+end)
+AFRight:AddSlider("af_offy",{Text="Y Offset",Default=-2,Min=-10,Max=5,Rounding=0}):OnChanged(function(v) AutoFarm.OffsetY=v end)
+print("[AutoFarm] Loaded")
 end
 
--- ── 5. THIRD PERSON UNLOCK ──────────────────────────────────────
-local TP = _PORT.ThirdPerson
-local function TP_Apply()
-    local ok,gc=pcall(function() return getgc(true) end)
-    if not ok or not gc then return end
-    for _,obj in pairs(gc) do
-        if type(obj)=="table" and rawget(obj,"FIRST_PERSON")~=nil then
-            pcall(function() obj.FIRST_PERSON=false end)
+-- =================================================================
+-- BLOCK 3: ZOMBIE ESP PHÂN LOẠI (thêm vào Visuals tab)
+-- =================================================================
+do
+local ZCfg={
+    Filter={[1]=true,[2]=true,[3]=true,[4]=true,[5]=true,[6]=true,[7]=true},
+    Colors={
+        [1]=Color3.fromRGB(148,74,0),  [2]=Color3.fromRGB(255,255,0),
+        [3]=Color3.fromRGB(255,0,0),   [4]=Color3.fromRGB(148,0,255),
+        [5]=Color3.fromRGB(255,100,0), [6]=Color3.fromRGB(200,0,255),
+        [7]=Color3.fromRGB(255,50,50),
+    },
+    HighlightEnabled=false, FillTransp=0.75, OutlineTransp=0.0, VisibleOnly=false, PerType=false,
+}
+getgenv().TK_ZombieCfg=ZCfg
+
+-- Highlight riêng theo loại
+local _highlights={}
+local _hlConn=AimRunService.Heartbeat:Connect(function()
+    if not ZCfg.HighlightEnabled then
+        for actor,h in pairs(_highlights) do
+            pcall(function() h:Destroy() end); _highlights[actor]=nil
+        end
+        return
+    end
+    Combat.Sync()
+    local alive={}
+    for _,actor in ipairs(Combat.actors) do
+        local kind=Combat.Kind(actor)
+        if not kind or not Combat.IsAlive(actor) or not actor.Character then continue end
+        -- zombie filter
+        if kind=="Zombies" then
+            local ab=actor.Health and type(actor.Health)=="table" and actor.Health.Ability
+            if ab and ZCfg.Filter[ab]==false then continue end
+        end
+        alive[actor]=true
+        local color
+        if ZCfg.PerType and kind=="Zombies" then
+            local ab=actor.Health and type(actor.Health)=="table" and actor.Health.Ability
+            color=ZCfg.Colors[ab] or Color3.fromRGB(255,0,0)
+        elseif kind=="Zombies" then color=Color3.fromRGB(255,0,0)
+        elseif kind=="Players" then color=Color3.fromRGB(255,165,0)
+        else color=Color3.fromRGB(255,255,0) end
+
+        local h=_highlights[actor]
+        local charChanged=h and actor.Character and h.Parent~=actor.Character
+        if not h or not h.Parent or charChanged then
+            if h then pcall(function() h:Destroy() end) end
+            local nh=Instance.new("Highlight")
+            nh.FillColor=color; nh.FillTransparency=ZCfg.FillTransp
+            nh.OutlineColor=color; nh.OutlineTransparency=ZCfg.OutlineTransp
+            pcall(function()
+                nh.DepthMode=ZCfg.VisibleOnly and Enum.HighlightDepthMode.Occluded or Enum.HighlightDepthMode.AlwaysOnTop
+            end)
+            if actor.Character then nh.Parent=actor.Character end
+            _highlights[actor]=nh
+        else
+            h.FillColor=color; h.OutlineColor=color
+            h.FillTransparency=ZCfg.FillTransp; h.OutlineTransparency=ZCfg.OutlineTransp
         end
     end
+    for actor,h in pairs(_highlights) do
+        if not alive[actor] then pcall(function() h:Destroy() end); _highlights[actor]=nil end
+    end
+end)
+table.insert(Combat.connections,_hlConn)
+
+-- UI Visuals tab
+local ZHL=Tabs.Visuals:AddLeftGroupbox("Highlight ESP")
+ZHL:AddToggle("zhl_en",{Text="Enable Highlight",Default=false}):OnChanged(function(v) ZCfg.HighlightEnabled=v end)
+ZHL:AddToggle("zhl_pertype",{Text="Color Per Zombie Type",Default=false}):OnChanged(function(v) ZCfg.PerType=v end)
+ZHL:AddToggle("zhl_visonly",{Text="Visible Only",Default=false}):OnChanged(function(v) ZCfg.VisibleOnly=v end)
+ZHL:AddSlider("zhl_fill",{Text="Fill Transparency",Default=75,Min=0,Max=100,Rounding=0}):OnChanged(function(v) ZCfg.FillTransp=v/100 end)
+ZHL:AddSlider("zhl_outline",{Text="Outline Transparency",Default=0,Min=0,Max=100,Rounding=0}):OnChanged(function(v) ZCfg.OutlineTransp=v/100 end)
+
+local ZFilter=Tabs.Visuals:AddRightGroupbox("Zombie Filter")
+local ztypes={{"Crippled",1},{"Slow",2},{"Normal",3},{"Sprinter",4},{"Tank",5},{"Screamer",6},{"Bomber",7}}
+for _,e in ipairs(ztypes) do
+    local name,k=e[1],e[2]
+    ZFilter:AddToggle("zf_"..name,{Text="Show "..name,Default=true}):OnChanged(function(v) ZCfg.Filter[k]=v end)
 end
-local function TP_Tick()
-    if not TP.Enabled then return end
-    local now=tick()
-    if now-TP._lastScan<1 then return end
-    TP._lastScan=now; TP_Apply()
-end
-local function TP_Start()
-    if TP._connection then return end
-    TP_Apply()
-    TP._connection=AimRunService.Heartbeat:Connect(TP_Tick)
-    table.insert(Combat.connections, TP._connection)
-end
-local function TP_Stop()
-    if TP._connection then pcall(function() TP._connection:Disconnect() end); TP._connection=nil end
+print("[ZombieESP] Loaded")
 end
 
--- ── 6. VEHICLE TELEPORTER ───────────────────────────────────────
-local VT = _PORT.VehicleTeleport
+-- =================================================================
+-- BLOCK 4: VEHICLE TELEPORTER (port từ tipmobile, dùng tipmobile services)
+-- =================================================================
+do
+local VT={_savedCF=nil}
+getgenv().TK_VT=VT
+
 local function VT_GetVehicle()
-    local localActor=PORT_GetLocalActor(); if not localActor then return nil end
-    local seat=localActor.Seat; if not seat then return nil end
+    local me=GetLocalActor(); if not me then return nil end
+    local seat=me.Seat; if not seat then return nil end
+    -- Tìm qua VehicleService
+    local c=Combat.Service()
+    local vs=c and c.VehicleService
+    if vs and vs.Vehicles then
+        local uid=seat.UID
+        if uid then
+            for _,veh in pairs(vs.Vehicles) do
+                if rawget(veh,"UID")==uid then return veh end
+            end
+        end
+    end
+    -- GC scan fallback
     local ok,gc=pcall(function() return getgc(true) end)
-    if not ok or not gc then return nil end
+    if not ok then return nil end
     for _,obj in pairs(gc) do
         if type(obj)=="table" and rawget(obj,"Controlling")==true
             and rawget(obj,"ComponentReplicates")~=nil
-            and (rawget(obj,"SetRPM") or rawget(obj,"_updateLightModes") or rawget(obj,"Hitbox")) then
-            return obj
-        end
+            and (rawget(obj,"SetRPM") or rawget(obj,"_updateLightModes") or rawget(obj,"Hitbox"))
+        then return obj end
     end
     return nil
 end
+
 local function VT_GetSolver(vehicle)
     local ok,gc=pcall(function() return getgc(true) end)
-    if not ok or not gc then return nil end
+    if not ok then return nil end
     for _,obj in pairs(gc) do
         if type(obj)=="table" and rawget(obj,"_vehicle")==vehicle and rawget(obj,"_solver") then
             return obj._solver
@@ -4956,154 +4807,247 @@ local function VT_GetSolver(vehicle)
     end
     return nil
 end
-local function VT_TeleportTo(targetCF)
+
+local function TeleportVehicle(targetCF)
     local vehicle=VT_GetVehicle()
     if vehicle then
         pcall(function() vehicle.CFrame=targetCF; if vehicle.Hitbox then vehicle.Hitbox.CFrame=targetCF end end)
         pcall(function()
-            local solver=VT_GetSolver(vehicle)
-            if solver and solver.SetState then solver:SetState(targetCF,Vector3.new(0,0,0),Vector3.new(0,0,0),vehicle.ComponentReplicates) end
+            local s=VT_GetSolver(vehicle)
+            if s and s.SetState then s:SetState(targetCF,Vector3.new(0,0,0),Vector3.new(0,0,0),vehicle.ComponentReplicates) end
         end)
+        local me=GetLocalActor()
+        if me then pcall(function() me.SimulatedPosition=targetCF.Position end) end
+        Notify("Vehicle teleported!",2)
     else
-        local la=PORT_GetLocalActor()
-        if la then
-            pcall(function() la.SimulatedPosition=targetCF.Position; la.Position=targetCF.Position
-                if la.Character and la.Character.PrimaryPart then la.Character.PrimaryPart.CFrame=targetCF end end)
-        end
-    end
-    Library:Notify("Teleport xong!", 2)
-end
-local function VT_GetNearestEnemy()
-    local me=PORT_GetLocalActor(); if not me or not me.Position then return nil end
-    local best,bestDist=nil,math.huge
-    Combat.Sync()
-    for _,actor in ipairs(Combat.actors) do
-        if Combat.IsAlive(actor) and actor.Position and Combat.Kind(actor) then
-            local d=(actor.Position-me.Position).Magnitude
-            if d<bestDist then bestDist=d; best=actor end
-        end
-    end
-    return best
-end
-local _VT_Waypoint=nil
-
--- ── 7. NIGHT VISION + FULLBRIGHT ────────────────────────────────
-local NVG = _PORT.NVG
-local function NVG_Apply()
-    if not NVG.Effect then return end
-    NVG.Effect.Brightness  = NVG.Brightness
-    NVG.Effect.Contrast    = NVG.Contrast
-    NVG.Effect.Saturation  = NVG.Saturation
-    NVG.Effect.Enabled     = true
-end
-local _nvgColors = { Green=Color3.fromRGB(112,245,65), Blue=Color3.fromRGB(165,233,255) }
-local _currentNVGColor = "Green"
-local function NVG_Enable(enabled)
-    local Lighting=game:GetService("Lighting")
-    if enabled then
-        if not NVG.Effect then
-            NVG.Effect=Instance.new("ColorCorrectionEffect")
-            NVG.Effect.Name="PORT_NightVision"
-            NVG.Effect.Parent=Lighting
-        end
-        NVG.Effect.TintColor=_nvgColors[_currentNVGColor] or _nvgColors.Green
-        NVG_Apply()
-    else
-        if NVG.Effect then NVG.Effect.Enabled=false end
-    end
-end
-local function Fullbright_Enable(enabled)
-    local Lighting=game:GetService("Lighting")
-    if enabled then
-        if not NVG.Fullbright then
-            NVG.Fullbright=Instance.new("ColorCorrectionEffect")
-            NVG.Fullbright.Name="PORT_Fullbright"
-            NVG.Fullbright.Parent=Lighting
-        end
-        NVG.Fullbright.Brightness=0.5; NVG.Fullbright.Contrast=0.2
-        NVG.Fullbright.Saturation=0; NVG.Fullbright.Enabled=true
-        pcall(function() Lighting.GlobalShadows=false end)
-    else
-        if NVG.Fullbright then NVG.Fullbright.Enabled=false end
-        pcall(function() Lighting.GlobalShadows=true end)
+        local me=GetLocalActor()
+        if me then
+            pcall(function()
+                me.SimulatedPosition=targetCF.Position; me.Position=targetCF.Position
+                if me.Character and me.Character.PrimaryPart then me.Character.PrimaryPart.CFrame=targetCF end
+            end)
+            Notify("Nhân vật teleported!",2)
+        else Notify("Get in a vehicle first!",3) end
     end
 end
 
--- ── 8. BULLET TRACER ────────────────────────────────────────────
-local BT = _PORT.BulletTracer
-local function BT_SpawnPart(fromPos, toPos)
-    local dist=(toPos-fromPos).Magnitude; if dist<0.5 then return end
-    local part=Instance.new("Part")
-    part.Name="PORT_BT"; part.Anchored=true; part.CanCollide=false
-    part.CanTouch=false; part.CastShadow=false
-    part.Size=Vector3.new(BT.Width, BT.Width, dist)
-    part.CFrame=CFrame.new((fromPos+toPos)/2, toPos)
-    part.Color=BT.Color; part.Transparency=BT.Transparency; part.Material=Enum.Material.Neon
-    pcall(function() part.Parent=workspace end)
-    table.insert(BT._parts, {part=part, born=tick()})
+local VTGroup=Tabs.Mods:AddLeftGroupbox("Vehicle Teleporter")
+VTGroup:AddButton("Lấy Toạ Độ",function()
+    pcall(function()
+        local v=VT_GetVehicle()
+        if v then
+            local cf=v.CFrame or (v.Hitbox and v.Hitbox.CFrame)
+            if cf then VT._savedCF=cf; Notify("Đã lưu toạ độ xe!",2); return end
+        end
+        local me=GetLocalActor()
+        if me and me.Character and me.Character.PrimaryPart then
+            VT._savedCF=me.Character.PrimaryPart.CFrame; Notify("Đã lưu toạ độ nhân vật!",2)
+        else Notify("Không tìm được toạ độ!",3) end
+    end)
+end)
+VTGroup:AddButton("Teleport Phương Tiện",function()
+    if not VT._savedCF then Notify("Chưa lưu toạ độ!",3); return end
+    TeleportVehicle(VT._savedCF)
+end)
+VTGroup:AddButton("Xóa Toạ Độ",function()
+    VT._savedCF=nil; Notify("Đã xóa!",2)
+end)
+print("[VehicleTeleporter] Loaded")
 end
-local function BT_Update()
-    local now=tick(); local rem={}
-    for i,t in ipairs(BT._parts) do
-        if not t.part or not t.part.Parent then rem[#rem+1]=i; continue end
-        local age=now-t.born
-        if age>=BT.Lifetime then pcall(function() t.part:Destroy() end); rem[#rem+1]=i
-        elseif BT.FadeOut then
-            local a=age/BT.Lifetime
-            pcall(function() t.part.Transparency=BT.Transparency+(1-BT.Transparency)*a end)
+
+-- =================================================================
+-- BLOCK 5: ANTI FALL + THIRD PERSON + AUTO LOCKPICK
+-- (thêm vào Tabs.Movement bên ngoài legacyPage vì cần AddLeftGroupbox trực tiếp)
+-- =================================================================
+do
+-- Anti Fall
+local AntiFall={Enabled=false}
+getgenv().TK_AntiFall=AntiFall
+local _afHb=AimRunService.Heartbeat:Connect(function()
+    if not AntiFall.Enabled then return end
+    local me=GetLocalActor(); if not me then return end
+    pcall(function() me.HeightState=0; me.Grounded=true end)
+    -- controller
+    local c=Combat.Service()
+    if c and c.ControllerService and c.ControllerService.Controller then
+        local ctrl=c.ControllerService.Controller
+        pcall(function() ctrl.HeightState=0; ctrl.IsGrounded=true end)
+    end
+end)
+table.insert(Combat.connections,_afHb)
+
+-- Third Person
+local TP={Enabled=false,_conn=nil,_lastScan=0}
+getgenv().TK_TP=TP
+local function TP_Apply()
+    local ok,gc=pcall(function() return getgc(true) end); if not ok then return end
+    for _,obj in pairs(gc) do
+        if type(obj)=="table" and rawget(obj,"FIRST_PERSON")~=nil then
+            pcall(function() obj.FIRST_PERSON=false end)
         end
     end
-    for i=#rem,1,-1 do table.remove(BT._parts, rem[i]) end
+end
+
+-- Auto Lockpick
+local ALP={Enabled=false,_conn=nil,_ctrl=nil,_nextResolve=0,_lastGC=0}
+getgenv().TK_ALP=ALP
+local function ALP_FindController()
+    if not getloadedmodules then return nil end
+    for _,m in ipairs(getloadedmodules()) do
+        if m.Name=="LockpickController" or m.Name=="Lockpick" or m.Name=="LockPick" then
+            local ok,v=pcall(require,m); if ok and type(v)=="table" then return v end
+        end
+    end
+    return nil
+end
+local function ALP_FindState()
+    local ok,gc=pcall(function() return filtergc("table") end)
+    if not ok then ok,gc=pcall(function() return getgc(true) end) end
+    if not ok then return nil end
+    for _,v in pairs(gc) do
+        if type(v)=="table" then
+            local p=rawget(v,"_progress") or rawget(v,"_pickProgress") or rawget(v,"Progress")
+            local a=rawget(v,"_active") or rawget(v,"_pickActive") or rawget(v,"Active")
+            if type(p)=="number" and a==true then return v end
+        end
+    end
+    return nil
+end
+local function ALP_Complete(obj)
+    local mp=rawget(obj,"_maxProgress") or rawget(obj,"MaxProgress") or 1
+    if rawget(obj,"_progress") then obj._progress=mp end
+    if rawget(obj,"_pickProgress") then obj._pickProgress=mp end
+    if rawget(obj,"Progress") then obj.Progress=mp end
+    local pins=rawget(obj,"_pins") or rawget(obj,"Pins")
+    if type(pins)=="table" then
+        for _,p in pairs(pins) do if type(p)=="table" then
+            if rawget(p,"_solved") then p._solved=true end
+            if rawget(p,"Solved") then p.Solved=true end
+            if rawget(p,"_position") then p._position=rawget(p,"_target") or 1 end
+        end end
+    end
+    for _,n in ipairs({"_complete","Complete","_finish","Finish"}) do
+        local fn=rawget(obj,n); if type(fn)=="function" then pcall(fn,obj); break end
+    end
+end
+
+-- Movement groupboxes
+local MiscRight=Tabs.Movement:AddRightGroupbox("Extras")
+MiscRight:AddToggle("antifall_en",{Text="Anti Fall Damage",Default=false}):OnChanged(function(v) AntiFall.Enabled=v end)
+MiscRight:AddToggle("tp_en",{Text="Unlock Third Person",Default=false}):OnChanged(function(v)
+    TP.Enabled=v
+    if v then
+        TP_Apply()
+        if not TP._conn then
+            TP._conn=AimRunService.Heartbeat:Connect(function()
+                if not TP.Enabled then return end
+                local now=tick(); if now-TP._lastScan<1 then return end
+                TP._lastScan=now; TP_Apply()
+            end)
+            table.insert(Combat.connections,TP._conn)
+        end
+    else
+        if TP._conn then pcall(function() TP._conn:Disconnect() end); TP._conn=nil end
+    end
+end)
+MiscRight:AddToggle("alp_en",{Text="Auto Lockpick",Default=false}):OnChanged(function(v)
+    ALP.Enabled=v
+    if v and not ALP._conn then
+        ALP._ctrl=nil; ALP._nextResolve=0
+        ALP._conn=AimRunService.Heartbeat:Connect(function(dt)
+            if not ALP.Enabled then return end
+            local now=tick()
+            if not ALP._ctrl and now>ALP._nextResolve then
+                ALP._nextResolve=now+3; ALP._ctrl=ALP_FindController()
+            end
+            if ALP._ctrl then
+                local a=rawget(ALP._ctrl,"_active") or rawget(ALP._ctrl,"_pickActive") or rawget(ALP._ctrl,"Active")
+                if a then ALP_Complete(ALP._ctrl); return end
+            end
+            if now-ALP._lastGC>0.1 then
+                ALP._lastGC=now
+                local s=ALP_FindState(); if s then ALP_Complete(s) end
+            end
+        end)
+        table.insert(Combat.connections,ALP._conn)
+    elseif not v and ALP._conn then
+        pcall(function() ALP._conn:Disconnect() end); ALP._conn=nil; ALP._ctrl=nil
+    end
+end)
+print("[AntiFall+ThirdPerson+AutoLockpick] Loaded")
+end
+
+-- =================================================================
+-- BLOCK 6: BULLET TRACER + HIT SOUND + AUTO REMOVE TREE
+-- =================================================================
+do
+-- Bullet Tracer
+local BT={Enabled=false,Lifetime=3,Color=Color3.fromRGB(255,200,50),Transparency=0.3,Width=0.05,FadeOut=true,_parts={}}
+getgenv().TK_BT=BT
+
+local function BT_Spawn(from,to)
+    local d=(to-from).Magnitude; if d<0.5 then return end
+    local p=Instance.new("Part")
+    p.Name="TK_BT"; p.Anchored=true; p.CanCollide=false; p.CanTouch=false; p.CastShadow=false
+    p.Size=Vector3.new(BT.Width,BT.Width,d)
+    p.CFrame=CFrame.new((from+to)/2,to)
+    p.Color=BT.Color; p.Transparency=BT.Transparency; p.Material=Enum.Material.Neon
+    pcall(function() p.Parent=workspace end)
+    BT._parts[#BT._parts+1]={p=p,t=tick()}
 end
 local _btHb=AimRunService.Heartbeat:Connect(function()
-    if #BT._parts>0 then BT_Update() end
+    if #BT._parts==0 then return end
+    local now=tick(); local rm={}
+    for i,e in ipairs(BT._parts) do
+        if not e.p or not e.p.Parent then rm[#rm+1]=i; continue end
+        local age=now-e.t
+        if age>=BT.Lifetime then pcall(function() e.p:Destroy() end); rm[#rm+1]=i
+        elseif BT.FadeOut then pcall(function() e.p.Transparency=BT.Transparency+(1-BT.Transparency)*(age/BT.Lifetime) end) end
+    end
+    for i=#rm,1,-1 do table.remove(BT._parts,rm[i]) end
 end)
-table.insert(Combat.connections, _btHb)
+table.insert(Combat.connections,_btHb)
 
--- Hook BulletService cho Bullet Tracer + Hit Sound sau khi services init
-task.delay(4, function()
-    -- Tìm BulletService từ getloadedmodules
-    local _bulletSvc=nil
+-- Hit Sound
+local HS={Enabled=false,Volume=0.5,_sound=nil}
+getgenv().TK_HS=HS
+pcall(function()
+    local s=Instance.new("Sound"); s.Name="TK_HitSound"
+    s.SoundId="rbxassetid://79887435989574"; s.Volume=0.5
+    s.RollOffMaxDistance=0; s.Parent=game:GetService("SoundService")
+    HS._sound=s
+end)
+
+-- Hook BulletService sau 4s (đợi game load)
+task.delay(4,function()
+    local BulletService
     if getloadedmodules then
         for _,m in ipairs(getloadedmodules()) do
             if m.Name=="BulletService" then
                 local ok,v=pcall(require,m)
-                if ok and type(v)=="table" and type(v.Discharge)=="function" then
-                    _bulletSvc=v; break
-                end
+                if ok and type(v)=="table" and type(v.Discharge)=="function" then BulletService=v; break end
             end
         end
     end
-    if not _bulletSvc then return end
-
-    local existingDischarge = _bulletSvc.Discharge
-    _bulletSvc.Discharge = function(self, originCF, ...)
-        local res={pcall(existingDischarge, self, originCF, ...)}
+    if not BulletService or BulletService._TK_Hooked then return end
+    local orig=BulletService.Discharge
+    BulletService.Discharge=function(self,originCF,...)
+        local res={pcall(orig,self,originCF,...)}
         if originCF then
-            local mPos=originCF.Position
-            local dir=originCF.LookVector
-            local rp=RaycastParams.new()
-            rp.FilterType=Enum.RaycastFilterType.Exclude
-            local fl={AimCamera}
-            if AimLocalPlayer.Character then fl[2]=AimLocalPlayer.Character end
+            local mPos=originCF.Position; local dir=originCF.LookVector
+            local rp=RaycastParams.new(); rp.FilterType=Enum.RaycastFilterType.Exclude
+            local fl={AimCamera}; if AimLocalPlayer.Character then fl[2]=AimLocalPlayer.Character end
             rp.FilterDescendantsInstances=fl
-            local ray=workspace:Raycast(mPos, dir*2000, rp)
+            local ray=workspace:Raycast(mPos,dir*2000,rp)
             local hitPos=ray and ray.Position or mPos+dir*800
-            -- Bullet Tracer
-            if BT.Enabled then
-                task.spawn(BT_SpawnPart, mPos, hitPos)
-            end
-            -- Hit Sound
-            local HS=_PORT.HitSound
-            if HS.Enabled and ray and ray.Instance then
-                local hitModel=ray.Instance:FindFirstAncestorOfClass("Model")
-                if hitModel then
+            if BT.Enabled then task.spawn(BT_Spawn,mPos,hitPos) end
+            if HS.Enabled and HS._sound and ray and ray.Instance then
+                local model=ray.Instance:FindFirstAncestorOfClass("Model")
+                if model then
                     Combat.Sync()
-                    for _,actor in ipairs(Combat.actors) do
-                        if Combat.IsAlive(actor) and actor.Character==hitModel then
-                            if HS._sound then pcall(function()
-                                HS._sound.Volume=HS.Volume; HS._sound:Play()
-                            end) end
+                    for _,a in ipairs(Combat.actors) do
+                        if Combat.IsAlive(a) and a.Character==model then
+                            pcall(function() HS._sound.Volume=HS.Volume; HS._sound:Play() end)
                             break
                         end
                     end
@@ -5112,272 +5056,60 @@ task.delay(4, function()
         end
         if res[1] then return table.unpack(res,2) end
     end
-    _bulletSvc._portHooked=true
-    print("[PORT] BulletService hooked cho Tracer + HitSound")
+    BulletService._TK_Hooked=true
+    print("[BulletTracer+HitSound] Hooked BulletService")
 end)
 
--- ── 9. HIT SOUND INIT ───────────────────────────────────────────
-local HS=_PORT.HitSound
-local function HS_Init()
-    if HS._sound and HS._sound.Parent then return end
-    local s=Instance.new("Sound"); s.Name="PORT_HitSound"
-    s.SoundId="rbxassetid://79887435989574"; s.Volume=HS.Volume
-    s.RollOffMaxDistance=0; s.Parent=game:GetService("SoundService")
-    HS._sound=s
-end
-HS_Init()
-
--- ── 10. ANTI FALL DAMAGE ────────────────────────────────────────
-local AntiFall=_PORT.AntiFall
-local _antiFallHb=AimRunService.Heartbeat:Connect(function()
-    if not AntiFall.Enabled then return end
-    local myActor=PORT_GetLocalActor(); if not myActor then return end
-    pcall(function() myActor.HeightState=0; myActor.Grounded=true end)
-end)
-table.insert(Combat.connections, _antiFallHb)
-
--- ── 11. AUTO REMOVE TREE ────────────────────────────────────────
-local AT=_PORT.AutoTree
-local _treePrefixes={"arb","qradbiq","oradbbig","oragedbbig"}
-local function AT_DeleteTrees()
-    local toDelete={}; local parentMark={}
+-- Auto Tree
+local AT={Enabled=false,_conn=nil}
+local _treePfx={"arb","qradbiq","oradbbig","oragedbbig"}
+local function AT_Delete()
+    local del={}; local marked={}
     for _,obj in pairs(workspace:GetDescendants()) do
-        local name=obj.Name:lower(); local matched=false
-        for _,p in ipairs(_treePrefixes) do
-            if name:sub(1,#p)==p then matched=true; break end
-        end
-        if matched then
-            if obj:IsA("Model") or obj:IsA("Folder") then
-                table.insert(toDelete,obj); parentMark[obj]=true
-            elseif obj.Parent and not parentMark[obj.Parent] then
-                table.insert(toDelete,obj)
-            end
+        local nm=obj.Name:lower(); local match=false
+        for _,p in ipairs(_treePfx) do if nm:sub(1,#p)==p then match=true; break end end
+        if match then
+            if obj:IsA("Model") or obj:IsA("Folder") then del[#del+1]=obj; marked[obj]=true
+            elseif not marked[obj.Parent] then del[#del+1]=obj end
         end
     end
-    for _,obj in pairs(toDelete) do if obj and obj.Parent then pcall(function() obj:Destroy() end) end end
+    for _,o in ipairs(del) do if o and o.Parent then pcall(function() o:Destroy() end) end end
 end
 
--- ================================================================
--- UI: Thêm các section vào các Tab hiện có của BRM5
--- ================================================================
+-- UI: Mods tab (ngoài legacyPage — AddLeftGroupbox trực tiếp)
+local BTGroup=Tabs.Mods:AddRightGroupbox("Bullet Tracer")
+BTGroup:AddToggle("bt_en",{Text="Enable",Default=false}):OnChanged(function(v) BT.Enabled=v end)
+BTGroup:AddSlider("bt_life",{Text="Lifetime (s)",Default=3,Min=1,Max=20,Rounding=0}):OnChanged(function(v) BT.Lifetime=v end)
+BTGroup:AddSlider("bt_transp",{Text="Transparency",Default=30,Min=0,Max=100,Rounding=0}):OnChanged(function(v) BT.Transparency=v/100 end)
+BTGroup:AddSlider("bt_width",{Text="Width",Default=5,Min=1,Max=50,Rounding=0}):OnChanged(function(v) BT.Width=v/100 end)
+BTGroup:AddToggle("bt_fade",{Text="Fade Out",Default=true}):OnChanged(function(v) BT.FadeOut=v end)
 
--- ── Visuals Tab → Zombie ESP + Highlight Options ─────────────────
-do
-    local ZombieESPGroup = Tabs.Visuals:AddLeftGroupbox('Zombie ESP')
-    ZombieESPGroup:AddToggle('zomhl_enabled',{Text='Highlight Zombies',Default=false}):OnChanged(function(v)
-        Sense._highlightPortEnabled = v and not Toggles.zomhl_zombieonly.Value
-        Sense._highlightPortEnabled = v  -- flag chính
-    end)
-    ZombieESPGroup:AddToggle('zomhl_zombieonly',{Text='Zombie Only',Default=false}):OnChanged(function(v)
-        _PORT.Highlight.ZombieOnly=v
-    end)
-    ZombieESPGroup:AddToggle('zomhl_visonly',{Text='Visible Only (No Wallhack)',Default=false}):OnChanged(function(v)
-        _PORT.Highlight.VisibleOnly=v
-    end)
-    ZombieESPGroup:AddToggle('zomhl_pertype',{Text='Color Per Zombie Type',Default=false}):OnChanged(function(v)
-        _PORT.Highlight.PerType=v
-    end)
-    ZombieESPGroup:AddSlider('zomhl_fill',{Text='Fill Transparency',Default=75,Min=0,Max=100,Rounding=0}):OnChanged(function(v)
-        _PORT.Highlight.FillTransp=v/100
-    end)
-    ZombieESPGroup:AddSlider('zomhl_outline',{Text='Outline Transparency',Default=0,Min=0,Max=100,Rounding=0}):OnChanged(function(v)
-        _PORT.Highlight.OutlineTransp=v/100
-    end)
+local HSGroup=Tabs.Mods:AddLeftGroupbox("Hit Sound")
+HSGroup:AddToggle("hs_en",{Text="Enable",Default=false}):OnChanged(function(v) HS.Enabled=v end)
+HSGroup:AddSlider("hs_vol",{Text="Volume",Default=50,Min=0,Max=100,Rounding=0}):OnChanged(function(v)
+    HS.Volume=v/100; if HS._sound then pcall(function() HS._sound.Volume=HS.Volume end) end
+end)
+HSGroup:AddButton("Test Sound",function()
+    if HS._sound then pcall(function() HS._sound:Play() end) end
+end)
 
-    -- Zombie type filters
-    local ZombieFilterGroup = Tabs.Visuals:AddRightGroupbox('Zombie Type Filter')
-    local zombieTypes = {
-        {k=1,n="Crippled"},{k=2,n="Slow"},{k=3,n="Normal"},{k=4,n="Sprinter"},
-        {k=5,n="Tank"},{k=6,n="Screamer"},{k=7,n="Bomber"},
-    }
-    for _,entry in ipairs(zombieTypes) do
-        local k=entry.k
-        ZombieFilterGroup:AddToggle('zomfil_'..entry.n,{Text='Show '..entry.n,Default=true}):OnChanged(function(v)
-            _PORT.ZombieFilter[k]=v
-        end)
+local ATGroup=Tabs.Mods:AddRightGroupbox("Auto Remove Tree")
+ATGroup:AddToggle("at_en",{Text="Enable",Default=false}):OnChanged(function(v)
+    AT.Enabled=v
+    if v and not AT._conn then
+        AT._conn=AimRunService.Heartbeat:Connect(function() if AT.Enabled then AT_Delete() end end)
+        table.insert(Combat.connections,AT._conn)
+    elseif not v and AT._conn then
+        pcall(function() AT._conn:Disconnect() end); AT._conn=nil
     end
-    -- Zombie type colors
-    local ZombieColorGroup = Tabs.Visuals:AddRightGroupbox('Zombie Colors (Port)')
-    local colorNames = {"Crippled","Slow","Normal","Sprinter","Tank","Screamer","Bomber"}
-    for i,name in ipairs(colorNames) do
-        ZombieColorGroup:AddLabel('zombie_col_'..name):AddColorPicker('zombiecol_'..i,{
-            Default=_PORT.ZombieColors[i], Title=name
-        }):OnChanged(function(v) _PORT.ZombieColors[i]=v end)
-    end
+end)
+ATGroup:AddButton("Delete Once",function() pcall(AT_Delete) end)
+
+print("[BulletTracer+HitSound+AutoTree] Loaded")
 end
 
--- ── Combat Tab → Aura Kill + Auto Farm ──────────────────────────
-do
-    -- Aura Kill
-    local AKGroup = Tabs.Main:AddLeftGroupbox('Aura Kill')
-    AKGroup:AddToggle('ak_enabled',{Text='Enable Aura Kill',Default=false}):OnChanged(function(v)
-        AK.Enabled=v; if v then AK_Start() else AK_Stop() end
-    end)
-    AKGroup:AddSlider('ak_range',{Text='Range (studs)',Default=20,Min=1,Max=200,Rounding=0}):OnChanged(function(v)
-        AK.Range=v
-    end)
-    AKGroup:AddSlider('ak_interval',{Text='Attack Rate (ms)',Default=0,Min=0,Max=2000,Rounding=0}):OnChanged(function(v)
-        AK.Interval=v/1000
-    end)
-    AKGroup:AddSlider('ak_batch',{Text='Batch Size',Default=10,Min=1,Max=20,Rounding=0}):OnChanged(function(v)
-        AK.BatchSize=v
-    end)
-    AKGroup:AddDropdown('ak_part',{Text='Target Part',Default='Head',
-        Values={'Head','UpperTorso','LowerTorso'}}):OnChanged(function(v) AK.TargetPart=v end)
-    AKGroup:AddButton('Rescan Network', function()
-        AK._net=nil; AK._remote=nil
-        task.spawn(function()
-            local net=AK_FindNet(); local re=AK_GetRemote()
-            Library:Notify(net and re and ("OK: "..net._code:sub(1,8)) or "Fail — coba lagi", 5)
-        end)
-    end)
-
-    -- Auto Farm
-    local AFGroup = Tabs.Main:AddRightGroupbox('Auto Farm')
-    AFGroup:AddToggle('af_enabled',{Text='Enable Auto Farm',Default=false}):OnChanged(function(v)
-        AF.Enabled=v; if v then AF_Start() else AF_Stop() end
-    end)
-    AFGroup:AddSlider('af_offy',{Text='Y Offset',Default=-2,Min=-10,Max=5,Rounding=0}):OnChanged(function(v)
-        AF.OffsetY=v
-    end)
-end
-
--- ── Movement Tab → Night Vision, Fullbright, Anti Fall, Third Person ──
-do
-    local WorldGroup = Tabs.Movement:AddRightGroupbox('World / Vision')
-    WorldGroup:AddToggle('nvg_enabled',{Text='Night Vision',Default=false}):OnChanged(function(v)
-        NVG_Enable(v)
-    end)
-    WorldGroup:AddDropdown('nvg_color',{Text='NVG Color',Default='Green',Values={'Green','Blue'}}):OnChanged(function(v)
-        _currentNVGColor=v
-        if NVG.Effect and NVG.Effect.Enabled then
-            NVG.Effect.TintColor=_nvgColors[v] or _nvgColors.Green
-        end
-    end)
-    WorldGroup:AddSlider('nvg_bright',{Text='NVG Brightness',Default=15,Min=-50,Max=100,Rounding=0}):OnChanged(function(v)
-        NVG.Brightness=v/100; if NVG.Effect and NVG.Effect.Enabled then NVG_Apply() end
-    end)
-    WorldGroup:AddSlider('nvg_contrast',{Text='NVG Contrast',Default=50,Min=0,Max=100,Rounding=0}):OnChanged(function(v)
-        NVG.Contrast=v/100; if NVG.Effect and NVG.Effect.Enabled then NVG_Apply() end
-    end)
-    WorldGroup:AddToggle('nvg_fullbright',{Text='Fullbright',Default=false}):OnChanged(function(v)
-        Fullbright_Enable(v)
-    end)
-    WorldGroup:AddToggle('nvg_nofog',{Text='Remove Fog',Default=false}):OnChanged(function(v)
-        if v then
-            local L=game:GetService("Lighting")
-            L.FogEnd=100000; L.FogStart=100000
-        end
-    end)
-
-    -- Anti Fall
-    local AntiFallGroup = Tabs.Movement:AddRightGroupbox('Anti Fall')
-    AntiFallGroup:AddToggle('antifall_en',{Text='Enable Anti Fall',Default=false}):OnChanged(function(v)
-        AntiFall.Enabled=v
-    end)
-
-    -- Third Person
-    local TPGroup = Tabs.Movement:AddLeftGroupbox('Third Person Unlock')
-    TPGroup:AddToggle('tp_enabled',{Text='Unlock Third Person',Default=false}):OnChanged(function(v)
-        TP.Enabled=v; if v then TP_Start() else TP_Stop() end
-    end)
-end
-
--- ── Mods Tab → Bullet Tracer, Hit Sound, Auto Tree ──────────────
-do
-    -- Bullet Tracer
-    local BTGroup = Tabs.Mods:AddRightGroupbox('Bullet Tracer')
-    BTGroup:AddToggle('bt_enabled',{Text='Enable',Default=false}):OnChanged(function(v) BT.Enabled=v end)
-    BTGroup:AddSlider('bt_lifetime',{Text='Lifetime (s)',Default=3,Min=1,Max=20,Rounding=0}):OnChanged(function(v) BT.Lifetime=v end)
-    BTGroup:AddSlider('bt_transp',{Text='Transparency',Default=30,Min=0,Max=100,Rounding=0}):OnChanged(function(v) BT.Transparency=v/100 end)
-    BTGroup:AddSlider('bt_width',{Text='Width (x0.01)',Default=5,Min=1,Max=50,Rounding=0}):OnChanged(function(v) BT.Width=v/100 end)
-    BTGroup:AddToggle('bt_fade',{Text='Fade Out',Default=true}):OnChanged(function(v) BT.FadeOut=v end)
-    BTGroup:AddLabel('bt_color_lbl'):AddColorPicker('bt_color',{Default=BT.Color,Title='Tracer Color'}):OnChanged(function(v) BT.Color=v end)
-
-    -- Hit Sound
-    local HSGroup = Tabs.Mods:AddLeftGroupbox('Hit Sound')
-    HSGroup:AddToggle('hs_enabled',{Text='Enable',Default=false}):OnChanged(function(v) HS.Enabled=v end)
-    HSGroup:AddSlider('hs_volume',{Text='Volume',Default=50,Min=0,Max=100,Rounding=0}):OnChanged(function(v)
-        HS.Volume=v/100; if HS._sound then pcall(function() HS._sound.Volume=HS.Volume end) end
-    end)
-    HSGroup:AddButton('Test Sound', function()
-        if HS._sound then pcall(function() HS._sound:Play() end) end
-    end)
-
-    -- Auto Remove Tree
-    local ATGroup = Tabs.Mods:AddLeftGroupbox('Auto Remove Tree')
-    ATGroup:AddToggle('at_enabled',{Text='Enable',Default=false}):OnChanged(function(v)
-        AT.Enabled=v
-        if v then
-            if not AT._connection then
-                AT._connection=AimRunService.Heartbeat:Connect(function()
-                    if AT.Enabled then AT_DeleteTrees() end
-                end)
-                table.insert(Combat.connections, AT._connection)
-            end
-        else
-            if AT._connection then
-                pcall(function() AT._connection:Disconnect() end); AT._connection=nil
-            end
-        end
-    end)
-    ATGroup:AddButton('Delete Once', function() AT_DeleteTrees() end)
-end
-
--- ── Vehicles Tab → Vehicle Teleporter ───────────────────────────
-do
-    local VTGroup = Tabs.Movement:AddLeftGroupbox('Vehicle Teleporter')
-    VTGroup:AddButton('Lưu Toạ Độ', function()
-        local vehicle=VT_GetVehicle()
-        if vehicle then
-            local cf=vehicle.CFrame or (vehicle.Hitbox and vehicle.Hitbox.CFrame)
-            if cf then VT._savedCF=cf; Library:Notify("Đã lưu toạ độ xe!", 3); return end
-        end
-        local la=PORT_GetLocalActor()
-        if la and la.Character and la.Character.PrimaryPart then
-            VT._savedCF=la.Character.PrimaryPart.CFrame
-            Library:Notify("Đã lưu toạ độ nhân vật!", 3)
-        else
-            Library:Notify("Không tìm được toạ độ!", 3)
-        end
-    end)
-    VTGroup:AddButton('Teleport Phương Tiện', function()
-        if not VT._savedCF then Library:Notify("Chưa lưu toạ độ!", 3); return end
-        VT_TeleportTo(VT._savedCF)
-    end)
-    VTGroup:AddButton('Teleport đến Enemy Gần Nhất', function()
-        local enemy=VT_GetNearestEnemy()
-        if not enemy or not enemy.Position then Library:Notify("Không tìm thấy enemy!", 3); return end
-        VT_TeleportTo(CFrame.new(enemy.Position + Vector3.new(0,1,4)))
-    end)
-    VTGroup:AddButton('Đặt Waypoint (Crosshair)', function()
-        local ray=AimCamera:ViewportPointToRay(AimCamera.ViewportSize.X/2, AimCamera.ViewportSize.Y/2)
-        local result=workspace:Raycast(ray.Origin, ray.Direction*2000)
-        if result then
-            _VT_Waypoint=CFrame.new(result.Position+Vector3.new(0,2,0))
-            Library:Notify("Đã đặt waypoint!", 3)
-        else Library:Notify("Không có bề mặt!", 3) end
-    end)
-    VTGroup:AddButton('Teleport đến Waypoint', function()
-        if not _VT_Waypoint then Library:Notify("Chưa đặt waypoint!", 3); return end
-        VT_TeleportTo(_VT_Waypoint)
-    end)
-    VTGroup:AddButton('Xóa Waypoint', function()
-        _VT_Waypoint=nil; VT._savedCF=nil; Library:Notify("Đã xóa!", 2)
-    end)
-end
-
--- ── Auto Lockpick ────────────────────────────────────────────────
-do
-    local ALPGroup = Tabs.Mods:AddRightGroupbox('Auto Lockpick')
-    ALPGroup:AddToggle('alp_enabled',{Text='Enable',Default=false}):OnChanged(function(v)
-        ALP.Enabled=v; if v then ALP_Start() else ALP_Stop() end
-    end)
-end
-
-Library:Notify("Tokaihub PORT loaded — 11 features!", 5)
-print("[PORT] Tất cả tính năng từ tipmobile đã được port vào BRM5")
-
+Notify("TokaiHub PORT v3 loaded!",4)
+print("[PORT v3] Tất cả tính năng đã load")
 table.insert(Combat.connections, AimRunService.RenderStepped:Connect(Combat.Frame))
 
 -- Keep overlay visibility independent from text and performance updates.
