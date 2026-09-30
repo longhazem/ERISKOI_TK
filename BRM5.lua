@@ -113,7 +113,7 @@ local Window = Library:CreateWindow({
     Title = 'Tokaihub | BRM5',
     Center = true,
     AutoShow = true,
-    Size = UDim2.fromOffset(568, 660),
+    Size = UDim2.fromOffset(550, 600),
     TabPadding = 6,
     MenuFadeTime = 0.16
 })
@@ -4591,6 +4591,47 @@ MenuGroup:AddButton('Unload', function() Library:Unload() end)
 MenuGroup:AddLabel('Menu bind'):AddKeyPicker('MenuKeybind', { Default = 'None', NoUI = true, Text = 'Menu keybind' })
 
 Library.ToggleKeybind = Options.MenuKeybind -- Allows you to have a custom keybind for the menu
+
+-- Toggle button (same style as libba) — sits in ScreenGui, always visible, toggles the window
+do
+    local TweenService = game:GetService('TweenService')
+    local ToggleBtn = Instance.new('TextButton')
+    ToggleBtn.Name = 'ERISKOIToggle'
+    ToggleBtn.Size = UDim2.fromOffset(70, 22)
+    ToggleBtn.Position = UDim2.fromOffset(10, 10)
+    ToggleBtn.BackgroundColor3 = Library.MainColor
+    ToggleBtn.BorderColor3 = Library.AccentColor
+    ToggleBtn.BorderSizePixel = 1
+    ToggleBtn.Text = '☰ UI'
+    ToggleBtn.TextColor3 = Library.FontColor
+    ToggleBtn.TextSize = 13
+    ToggleBtn.Font = Enum.Font.Code
+    ToggleBtn.ZIndex = 999
+    ToggleBtn.AutoButtonColor = false
+    ToggleBtn.Parent = Library.ScreenGui
+
+    Library:AddToRegistry(ToggleBtn, {
+        BackgroundColor3 = 'MainColor',
+        BorderColor3    = 'AccentColor',
+        TextColor3      = 'FontColor',
+    })
+
+    -- Sync label with menu state
+    local function SyncLabel()
+        ToggleBtn.Text = Library.MenuOpen and '✕ UI' or '☰ UI'
+    end
+
+    ToggleBtn.MouseButton1Click:Connect(function()
+        task.spawn(function() Library:Toggle() end)
+        task.delay(Library.MenuOpen and 0 or 0.22, SyncLabel)
+    end)
+
+    -- Keep button in front after theme color updates
+    Library:GiveSignal(game:GetService('RunService').RenderStepped:Connect(function()
+        if ToggleBtn.Parent == nil then return end
+        ToggleBtn.Visible = true
+    end))
+end
 
 -- Addons:
 -- SaveManager (Allows you to have a configuration system)
