@@ -113,7 +113,7 @@ local Window = Library:CreateWindow({
     Title = 'Tokaihub | BRM5',
     Center = true,
     AutoShow = true,
-    Size = UDim2.fromOffset(550, 600),
+    Size = UDim2.fromOffset(520, 570),
     TabPadding = 6,
     MenuFadeTime = 0.16
 })
