@@ -1,4 +1,3 @@
-
 local repo = 'https://raw.githubusercontent.com/longhazem/ERISKOI_TK/main/'
 
 local LibrarySourceUrl = 'https://raw.githubusercontent.com/longhazem/ERISKOI_TK/main/LinoriaSrc.lua'
@@ -113,7 +112,7 @@ local Window = Library:CreateWindow({
     Title = 'Tokaihub | BRM5',
     Center = true,
     AutoShow = true,
-    Size = UDim2.fromOffset(520, 570),
+    Size = UDim2.fromOffset(568, 660),
     TabPadding = 6,
     MenuFadeTime = 0.16
 })
@@ -1038,7 +1037,81 @@ local Sense = (function()
         E.chams[kind]=table.clone(E.chams.npc)
         E.advanced[kind]=table.clone(E.advanced.npc)
     end
+    -- Zombie ability index → sub-kind label
+    local ZOMBIE_ABILITY_NAMES = { [1]='Crippled', [2]='Slow', [3]='Normal', [4]='Sprinter' }
+    local ZOMBIE_ABILITY_COLORS = {
+        [1] = Color3.fromRGB(148,74,0),   -- Crippled: brown
+        [2] = Color3.fromRGB(255,255,0),  -- Slow: yellow
+        [3] = Color3.fromRGB(255,50,50),  -- Normal: red
+        [4] = Color3.fromRGB(148,0,255),  -- Sprinter: purple
+    }
+
+    -- Highlight ESP: separate Highlight instance per actor
+    local highlightObjects = {}
+    local highlightEnabled = { npc=false, players=false, zombies=false, corpses=false }
+    local highlightColors  = {
+        npc     = { fill=Color3.fromRGB(0,200,100),   outline=Color3.fromRGB(255,255,255) },
+        players = { fill=Color3.fromRGB(255,140,0),   outline=Color3.fromRGB(255,255,255) },
+        zombies = { fill=Color3.fromRGB(255,50,50),   outline=Color3.fromRGB(255,255,255) },
+        corpses = { fill=Color3.fromRGB(80,80,80),    outline=Color3.fromRGB(180,180,180) },
+    }
+    E.highlightEnabled = highlightEnabled
+    E.highlightColors  = highlightColors
+
+    local function getHighlight(actor, kind)
+        if not highlightObjects[actor] then
+            local h = Instance.new('Highlight')
+            h.Name = 'TokaihubHL'
+            h.FillTransparency = 0.4
+            h.OutlineTransparency = 0
+            h.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+            h.Adornee = nil
+            highlightObjects[actor] = h
+        end
+        return highlightObjects[actor]
+    end
+
+    local function updateHighlights()
+        local c = E.Service()
+        local registry = c and c.Replicator and c.Replicator.Actors or {}
+        -- destroy orphaned highlights
+        for actor, h in pairs(highlightObjects) do
+            if not registry[actor.UID] or registry[actor.UID] ~= actor then
+                pcall(function() h:Destroy() end)
+                highlightObjects[actor] = nil
+            end
+        end
+        for _, actor in pairs(registry) do
+            local kind = E.Kind(actor)
+            if not kind then continue end
+            local enabled = highlightEnabled[kind]
+            local char = actor.Character
+            if enabled and char and char.Parent then
+                local h = getHighlight(actor, kind)
+                -- zombie color by ability
+                local fc = highlightColors[kind].fill
+                if kind == 'zombies' then
+                    local ab = actor.Health and type(actor.Health) == 'table' and actor.Health.Ability
+                    if ab and ZOMBIE_ABILITY_COLORS[ab] then fc = ZOMBIE_ABILITY_COLORS[ab] end
+                end
+                h.FillColor    = fc
+                h.OutlineColor = highlightColors[kind].outline
+                h.Adornee      = char
+                if h.Parent ~= workspace.CurrentCamera then
+                    h.Parent = workspace.CurrentCamera
+                end
+            else
+                local h = highlightObjects[actor]
+                if h then
+                    h.Adornee = nil
+                    h.Parent  = nil
+                end
+            end
+        end
+    end
+
     local service, resolveAt, connection, anchor
+    local highlightConnection
     local signs = {Vector3.new(-1,-1,-1),Vector3.new(-1,1,-1),Vector3.new(-1,1,1),Vector3.new(-1,-1,1),
         Vector3.new(1,-1,-1),Vector3.new(1,1,-1),Vector3.new(1,1,1),Vector3.new(1,-1,1)}
     local edges = {{1,2},{2,3},{3,4},{4,1},{5,6},{6,7},{7,8},{8,5},{1,5},{2,6},{3,7},{4,8}}
@@ -1616,7 +1689,7 @@ local Sense = (function()
                     label=a.DisplayName or (a.OwnerName~="???" and a.OwnerName) or (a.Zombie and "Zombie" or "NPC")
                     if not o.preview then label=tostring(label).." ["..tostring(a.UID):sub(1,6).."]" end
                 end
-                if kind=="zombies" then label="Zombie"
+                if kind=="zombies" then local _ab=a.Health and type(a.Health)=="table" and a.Health.Ability; label=ZOMBIE_ABILITY_NAMES[_ab] or "Zombie"
                 elseif kind=="corpses" then label="Corpse: "..(a.Zombie and "Zombie" or (E.IsPlayer(a) and a.Owner.Name or "NPC")) end
                 textAt(o,"name",label,Vector2.new(cx,min.Y-shared.textSize-3),t.nameColor,t.nameOutline,override)
             end
@@ -1652,9 +1725,15 @@ local Sense = (function()
         E._hasLoaded=true
         E.Sync(true)
         connection=AimRunService.RenderStepped:Connect(function() E.Render() end)
+        highlightConnection=AimRunService.Heartbeat:Connect(function()
+            local ok,err=pcall(updateHighlights)
+            if not ok then warn('[HighlightESP]',err) end
+        end)
     end
     function E.Unload()
         if connection then connection:Disconnect();connection=nil end
+        if highlightConnection then highlightConnection:Disconnect();highlightConnection=nil end
+        for actor,h in pairs(highlightObjects) do pcall(function() h:Destroy() end);highlightObjects[actor]=nil end
         for a,o in pairs(E.objects) do destroy(o);E.objects[a]=nil end
         if anchor then anchor:Destroy();anchor=nil end
         if E.textGui then E.textGui:Destroy(); E.textGui=nil end
@@ -2150,6 +2229,20 @@ local function buildTeamPage(page, team)
         Callback = espSetColor(t, "offScreenArrowColor")
     })
 
+    -- Highlight ESP
+    do
+        local hl  = Sense.highlightColors[team]
+        local hle = Sense.highlightEnabled
+        local HLSec = page:AddSection({Title = "Highlight", Side = "Right"})
+        HLSec:AddToggle({Text="Highlight", Flag=prefix.."highlight", Default=false,
+            Callback=function(v) hle[team]=v end})
+        HLSec:AddColorPicker({Text="Fill Color", Flag=prefix.."highlight_fill",
+            Default=hl and hl.fill or Color3.fromRGB(255,50,50),
+            Callback=function(color) if hl then hl.fill=color end end})
+        HLSec:AddColorPicker({Text="Outline Color", Flag=prefix.."highlight_outline",
+            Default=hl and hl.outline or Color3.fromRGB(255,255,255),
+            Callback=function(color) if hl then hl.outline=color end end})
+    end
     -- â•â•â• RIGHT: Chams â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
     local ChamsSec = page:AddSection({Title = "Chams", Side = "Right"})
 
@@ -4489,6 +4582,685 @@ end
 
 table.insert(Combat.connections, AimRunService.RenderStepped:Connect(Combat.Frame))
 
+-- ============================================================
+-- MISC TAB — NightVision, ThirdPerson, AutoLockpick, AutoFarm, AuraKill
+-- ============================================================
+local Tabs_Misc = Window:AddTab('Misc')
+local miscPages = {}
+local function miscPage(name)
+    local page = { Name = name, Groups = {} }
+    table.insert(miscPages, page)
+    function page:AddSection(info)
+        local group = info.Side == 'Right' and Tabs_Misc:AddRightGroupbox(info.Title)
+            or Tabs_Misc:AddLeftGroupbox(info.Title)
+        table.insert(self.Groups, group)
+        local section = {}
+        local lastToggle
+        function section:AddToggle(data)
+            local control = group:AddToggle(data.Flag, { Text = data.Text, Default = data.Default })
+            control:OnChanged(data.Callback)
+            lastToggle = control
+            return control
+        end
+        function section:AddSlider(data)
+            local control = group:AddSlider(data.Flag, {
+                Text = data.Text, Default = data.Default, Min = data.Min, Max = data.Max,
+                Rounding = data.Rounding or 0, Suffix = data.Suffix or '',
+            })
+            control:OnChanged(data.Callback)
+            return control
+        end
+        function section:AddDropdown(data)
+            local control = group:AddDropdown(data.Flag, {
+                Text = data.Text, Values = data.Options, Default = data.Default, Multi = data.Multi or false,
+            })
+            control:OnChanged(data.Callback)
+            return control
+        end
+        function section:AddButton(data)
+            group:AddButton(data.Text, data.Callback)
+        end
+        return section
+    end
+    return page
+end
+
+-- ============================================================
+-- NIGHT VISION / NVG
+-- ============================================================
+do
+    local NVGPage = miscPage('World')
+    local NVGSection = NVGPage:AddSection({ Title = 'Night Vision', Side = 'Left' })
+    local NVGColorCorrection = nil
+    local NVGColors = {
+        Green = Color3.fromRGB(112, 245, 65),
+        Blue  = Color3.fromRGB(165, 233, 255),
+    }
+    local CurrentNVGColor = 'Green'
+    local NVGEnabled = false
+
+    local function ApplyNVGEffect()
+        if NVGEnabled and NVGColorCorrection then
+            NVGColorCorrection.TintColor   = NVGColors[CurrentNVGColor] or NVGColors.Green
+            NVGColorCorrection.Brightness  = 0.15
+            NVGColorCorrection.Contrast    = 0.5
+            NVGColorCorrection.Saturation  = -1
+            NVGColorCorrection.Enabled     = true
+        elseif NVGColorCorrection then
+            NVGColorCorrection.Enabled = false
+        end
+    end
+
+    NVGSection:AddToggle({
+        Text = 'Night Vision', Flag = 'misc_nvg_enabled', Default = false,
+        Callback = function(v)
+            NVGEnabled = v
+            if v then
+                if not NVGColorCorrection then
+                    NVGColorCorrection = Instance.new('ColorCorrectionEffect')
+                    NVGColorCorrection.Name = 'TokaihubNVG'
+                    NVGColorCorrection.Parent = game:GetService('Lighting')
+                    table.insert(Combat.connections, game:GetService('Lighting').ChildRemoved:Connect(function(child)
+                        if child == NVGColorCorrection then NVGColorCorrection = nil end
+                    end))
+                end
+                ApplyNVGEffect()
+            else
+                if NVGColorCorrection then NVGColorCorrection.Enabled = false end
+            end
+        end,
+    })
+    NVGSection:AddDropdown({
+        Text = 'NVG Color', Flag = 'misc_nvg_color',
+        Options = { 'Green', 'Blue' }, Default = 'Green',
+        Callback = function(v) CurrentNVGColor = v; ApplyNVGEffect() end,
+    })
+    table.insert(Combat.connections, Library.OnUnload and Library.OnUnload(function()
+        if NVGColorCorrection then NVGColorCorrection:Destroy(); NVGColorCorrection = nil end
+    end) or (function() end)())
+end
+
+-- ============================================================
+-- THIRD PERSON UNLOCK
+-- GC scan mỗi 1s để force FIRST_PERSON = false
+-- ============================================================
+do
+    local TPPage = miscPage('Character')
+    local TPSection = TPPage:AddSection({ Title = 'Third Person', Side = 'Left' })
+    local ThirdPerson = { Enabled = false, _connection = nil, _lastScan = 0 }
+
+    local function TP_Apply()
+        local ok, gc = pcall(function() return (filtergc or getgc)('table') end)
+        if not ok or type(gc) ~= 'table' then
+            ok, gc = pcall(function() return getgc(true) end)
+        end
+        if not ok or type(gc) ~= 'table' then return end
+        for _, obj in pairs(gc) do
+            if type(obj) == 'table' and rawget(obj, 'FIRST_PERSON') ~= nil then
+                pcall(function() obj.FIRST_PERSON = false end)
+            end
+        end
+    end
+
+    TPSection:AddToggle({
+        Text = 'Unlock Third Person', Flag = 'misc_thirdperson', Default = false,
+        Callback = function(v)
+            ThirdPerson.Enabled = v
+            if v then
+                if ThirdPerson._connection then return end
+                TP_Apply()
+                ThirdPerson._connection = AimRunService.Heartbeat:Connect(function()
+                    if not ThirdPerson.Enabled then return end
+                    local now = tick()
+                    if now - ThirdPerson._lastScan < 1 then return end
+                    ThirdPerson._lastScan = now
+                    TP_Apply()
+                end)
+                table.insert(Combat.connections, ThirdPerson._connection)
+            else
+                if ThirdPerson._connection then
+                    ThirdPerson._connection:Disconnect()
+                    ThirdPerson._connection = nil
+                end
+            end
+        end,
+    })
+end
+
+-- ============================================================
+-- AUTO LOCKPICK
+-- Strategy 1: getloadedmodules → LockpickController
+-- Strategy 2: filtergc/getgc → live state table
+-- Strategy 3: InputService._mounts["PickLock"]
+-- ============================================================
+do
+    local ALPPage = miscPage('Misc')
+    local ALPSection = ALPPage:AddSection({ Title = 'Auto Lockpick', Side = 'Left' })
+
+    local AutoLockpick = {
+        Enabled = false, _connection = nil, _ctrl = nil,
+        _nextResolve = 0, _lastGCScan = 0, _inputSvc = nil,
+    }
+
+    local function ALP_FindController()
+        if not getloadedmodules then return nil end
+        for _, m in ipairs(getloadedmodules()) do
+            if m.Name == 'LockpickController' or m.Name == 'Lockpick' or m.Name == 'LockPick' then
+                local ok, ctrl = pcall(require, m)
+                if ok and type(ctrl) == 'table' then return ctrl end
+            end
+        end
+        return nil
+    end
+
+    local function ALP_FindActiveState()
+        local ok, gc
+        ok, gc = pcall(function() return filtergc('table') end)
+        if not ok then ok, gc = pcall(function() return getgc(true) end) end
+        if not ok or type(gc) ~= 'table' then return nil end
+        for _, v in pairs(gc) do
+            if type(v) == 'table' then
+                local prog  = rawget(v, '_progress') or rawget(v, '_pickProgress') or rawget(v, 'Progress')
+                local activ = rawget(v, '_active')   or rawget(v, '_pickActive')   or rawget(v, 'Active')
+                if type(prog) == 'number' and activ == true then return v end
+            end
+        end
+        return nil
+    end
+
+    local function ALP_FindInputService()
+        local ok, gc
+        ok, gc = pcall(function() return filtergc('table') end)
+        if not ok then ok, gc = pcall(function() return getgc(true) end) end
+        if not ok or type(gc) ~= 'table' then return nil end
+        for _, v in pairs(gc) do
+            if type(v) == 'table'
+                and rawget(v, '_mounts')   ~= nil
+                and rawget(v, 'Binds')     ~= nil
+                and rawget(v, 'Connected') ~= nil
+            then return v end
+        end
+        return nil
+    end
+
+    local function ALP_TryComplete(obj)
+        for _, name in ipairs({'_complete','Complete','_onComplete','OnComplete','_finish','Finish','_succeed','Succeed'}) do
+            local fn = rawget(obj, name)
+            if type(fn) == 'function' then pcall(fn, obj); return true end
+        end
+        return false
+    end
+
+    local function ALP_TryMountCall(mount, dt)
+        if type(mount) == 'function' then pcall(mount, true); return end
+        if type(mount) ~= 'table' then return end
+        for _, key in ipairs({'Update','_update','fire','Fire','Activate','activate'}) do
+            local fn = rawget(mount, key)
+            if type(fn) == 'function' then pcall(fn, mount, dt); break end
+        end
+        local mt = getmetatable(mount)
+        if mt and type(rawget(mt, '__call')) == 'function' then
+            pcall(mt.__call, mount, mount, true)
+        end
+    end
+
+    local function ALP_Solve(obj)
+        local maxProg = rawget(obj, '_maxProgress') or rawget(obj, 'MaxProgress') or 1
+        if rawget(obj, '_progress')     ~= nil then obj._progress     = maxProg end
+        if rawget(obj, '_pickProgress') ~= nil then obj._pickProgress = maxProg end
+        if rawget(obj, 'Progress')      ~= nil then obj.Progress      = maxProg end
+        local pins = rawget(obj, '_pins') or rawget(obj, 'Pins')
+        if type(pins) == 'table' then
+            for _, pin in pairs(pins) do
+                if type(pin) == 'table' then
+                    if rawget(pin, '_solved')   ~= nil then pin._solved   = true end
+                    if rawget(pin, '_set')      ~= nil then pin._set      = true end
+                    if rawget(pin, 'Solved')    ~= nil then pin.Solved    = true end
+                    if rawget(pin, '_position') ~= nil then pin._position = rawget(pin, '_target') or 1 end
+                end
+            end
+        end
+        ALP_TryComplete(obj)
+    end
+
+    local function ALP_Tick(dt)
+        if not AutoLockpick.Enabled then return end
+        local now = tick()
+        if not AutoLockpick._ctrl and now > AutoLockpick._nextResolve then
+            AutoLockpick._nextResolve = now + 3
+            AutoLockpick._ctrl = ALP_FindController()
+        end
+        if AutoLockpick._ctrl then
+            local ctrl = AutoLockpick._ctrl
+            local isActive = rawget(ctrl, '_active') or rawget(ctrl, '_pickActive') or rawget(ctrl, 'Active')
+            if isActive == true then ALP_Solve(ctrl); return end
+        end
+        if now - AutoLockpick._lastGCScan > 0.1 then
+            AutoLockpick._lastGCScan = now
+            local state = ALP_FindActiveState()
+            if state then ALP_Solve(state); return end
+        end
+        if not AutoLockpick._inputSvc then
+            AutoLockpick._inputSvc = ALP_FindInputService()
+        end
+        if AutoLockpick._inputSvc then
+            local mounts = rawget(AutoLockpick._inputSvc, '_mounts')
+            if mounts then
+                local mount = rawget(mounts, 'PickLock') or rawget(mounts, 'Lockpick') or rawget(mounts, 'lockpick')
+                if mount then ALP_TryMountCall(mount, dt) end
+            end
+        end
+    end
+
+    ALPSection:AddToggle({
+        Text = 'Auto Lockpick', Flag = 'misc_auto_lockpick', Default = false,
+        Callback = function(v)
+            AutoLockpick.Enabled = v
+            if v then
+                if AutoLockpick._connection then return end
+                AutoLockpick._ctrl = nil; AutoLockpick._inputSvc = nil; AutoLockpick._nextResolve = 0
+                AutoLockpick._connection = AimRunService.Heartbeat:Connect(function(dt)
+                    local ok, err = pcall(ALP_Tick, dt)
+                    if not ok then
+                        AutoLockpick._ctrl = nil; AutoLockpick._inputSvc = nil; AutoLockpick._nextResolve = 0
+                    end
+                end)
+                table.insert(Combat.connections, AutoLockpick._connection)
+            else
+                if AutoLockpick._connection then
+                    AutoLockpick._connection:Disconnect(); AutoLockpick._connection = nil
+                end
+                AutoLockpick._ctrl = nil; AutoLockpick._inputSvc = nil
+            end
+        end,
+    })
+end
+
+-- ============================================================
+-- AUTO FARM
+-- seek → teleport đến enemy → shoot N shots → return → seek
+-- ============================================================
+do
+    local AFPage = miscPage('Farm')
+    local AFSection = AFPage:AddSection({ Title = 'Auto Farm', Side = 'Left' })
+    local AFCfg = AFSection:AddSection and AFSection or AFPage:AddSection({ Title = 'Settings', Side = 'Right' })
+
+    local AutoFarm = {
+        Enabled = false, ShotsPerTarget = 2, ShootDelay = 0.12, SwitchDelay = 0.3,
+        TeleportOffset = Vector3.new(0, 2, 3),
+        _running = false, _connection = nil, _currentTarget = nil,
+        _shotsFired = 0, _lastShot = 0, _phase = 'seek',
+        _enemyIndex = 1, _originCF = nil, _returnTimer = 0,
+    }
+
+    local function AF_Teleport(targetActor)
+        local c = Combat.Service()
+        local myActor = c and c.Replicator and c.Replicator.LocalActor
+        if not myActor then return false end
+        local targetPos = targetActor.Position
+        if not targetPos then
+            local char = targetActor.Character
+            if char and char.PrimaryPart then targetPos = char.PrimaryPart.Position end
+        end
+        if not targetPos then return false end
+        local camDir = workspace.CurrentCamera and workspace.CurrentCamera.CFrame.LookVector or Vector3.new(0,0,-1)
+        local newPos = targetPos + Vector3.new(0, AutoFarm.TeleportOffset.Y, 0) + camDir * -AutoFarm.TeleportOffset.Z
+        pcall(function()
+            myActor.SimulatedPosition = newPos
+            myActor.ForceNextPosition = newPos
+            myActor.Position = newPos
+            if typeof(myActor.CFrame) == 'CFrame' then
+                myActor.CFrame = CFrame.new(newPos, targetPos) * CFrame.new(0,0,0)
+            end
+            local ctrl = Combat.Movement and Combat.Movement.currentController
+            if ctrl then ctrl._position = newPos end
+        end)
+        return true
+    end
+
+    local function AF_NextTarget()
+        local c = Combat.Service()
+        local registry = c and c.Replicator and c.Replicator.Actors
+        if not registry then return nil end
+        local enemies = {}
+        for _, actor in pairs(registry) do
+            if Combat.Kind(actor) and Combat.IsAlive(actor) and actor.Character and actor.Character.Parent then
+                table.insert(enemies, actor)
+            end
+        end
+        if #enemies == 0 then return nil end
+        local startIdx = AutoFarm._enemyIndex
+        local count = #enemies
+        for i = 1, count do
+            local idx = ((startIdx - 1 + i - 1) % count) + 1
+            local actor = enemies[idx]
+            if actor and Combat.IsAlive(actor) and actor.Character then
+                AutoFarm._enemyIndex = (idx % count) + 1
+                return actor
+            end
+        end
+        return nil
+    end
+
+    local function AF_Tick()
+        if not AutoFarm.Enabled then return end
+        local now = tick()
+        local c = Combat.Service()
+        local myActor = c and c.Replicator and c.Replicator.LocalActor
+        if not myActor then return end
+        local weapon = Combat.Weapon()
+
+        if AutoFarm._phase == 'seek' then
+            local target = AF_NextTarget()
+            if not target then return end
+            if not AutoFarm._originCF then
+                pcall(function()
+                    AutoFarm._originCF = typeof(myActor.CFrame) == 'CFrame' and myActor.CFrame
+                        or CFrame.new(myActor.Position)
+                end)
+            end
+            AutoFarm._currentTarget = target
+            AutoFarm._shotsFired = 0
+            AF_Teleport(target)
+            AutoFarm._phase = 'shoot'
+            AutoFarm._lastShot = now
+            return
+        end
+
+        if AutoFarm._phase == 'shoot' then
+            local target = AutoFarm._currentTarget
+            if not target or not Combat.IsAlive(target) then
+                AutoFarm._phase = 'return'; AutoFarm._returnTimer = now; return
+            end
+            if now - AutoFarm._lastShot < AutoFarm.ShootDelay then return end
+            if weapon and weapon._firearm then
+                local char = target.Character
+                if char then
+                    local part = char:FindFirstChild('Head') or char:FindFirstChild('UpperTorso') or char.PrimaryPart
+                    if part then
+                        Combat.target = { actor = target, part = part, position = part.Position, distance = 0 }
+                        Combat.sticky = target
+                        pcall(function() Combat.Fire() end)
+                    end
+                end
+            end
+            AutoFarm._shotsFired += 1
+            AutoFarm._lastShot = now
+            if AutoFarm._shotsFired >= AutoFarm.ShotsPerTarget then
+                AutoFarm._phase = 'switch'; AutoFarm._lastShot = now
+            end
+            return
+        end
+
+        if AutoFarm._phase == 'switch' then
+            if now - AutoFarm._lastShot >= AutoFarm.SwitchDelay then
+                AutoFarm._currentTarget = nil
+                Combat.target = nil; Combat.sticky = nil
+                AutoFarm._phase = 'return'; AutoFarm._returnTimer = now
+            end
+            return
+        end
+
+        if AutoFarm._phase == 'return' then
+            if AutoFarm._originCF then
+                pcall(function()
+                    local pos = AutoFarm._originCF.Position
+                    myActor.SimulatedPosition = pos
+                    myActor.ForceNextPosition = pos
+                    myActor.Position = pos
+                    if typeof(myActor.CFrame) == 'CFrame' then myActor.CFrame = AutoFarm._originCF end
+                    local ctrl = Combat.Movement and Combat.Movement.currentController
+                    if ctrl then ctrl._position = pos end
+                end)
+            end
+            if now - AutoFarm._returnTimer >= 0.5 then
+                AutoFarm._originCF = nil; AutoFarm._phase = 'seek'
+            end
+            return
+        end
+    end
+
+    AFSection:AddToggle({
+        Text = 'Auto Farm', Flag = 'misc_autofarm_enabled', Default = false,
+        Callback = function(v)
+            AutoFarm.Enabled = v
+            if v then
+                if AutoFarm._connection then return end
+                AutoFarm._phase = 'seek'; AutoFarm._enemyIndex = 1
+                AutoFarm._running = true
+                AutoFarm._connection = AimRunService.Heartbeat:Connect(function()
+                    local ok, err = pcall(AF_Tick)
+                    if not ok then warn('[AutoFarm]', err) end
+                end)
+                table.insert(Combat.connections, AutoFarm._connection)
+            else
+                AutoFarm._running = false
+                AutoFarm._currentTarget = nil; AutoFarm._originCF = nil
+                AutoFarm._phase = 'seek'; Combat.target = nil; Combat.sticky = nil
+                if AutoFarm._connection then
+                    AutoFarm._connection:Disconnect(); AutoFarm._connection = nil
+                end
+            end
+        end,
+    })
+    AFSection:AddSlider({
+        Text = 'Shots Per Target', Flag = 'misc_autofarm_shots', Min = 1, Max = 20, Default = 2, Rounding = 1,
+        Callback = function(v) AutoFarm.ShotsPerTarget = v end,
+    })
+    AFSection:AddSlider({
+        Text = 'Shoot Delay', Flag = 'misc_autofarm_shootdelay', Min = 0.05, Max = 1, Default = 0.12, Rounding = 0.01, Suffix = ' s',
+        Callback = function(v) AutoFarm.ShootDelay = v end,
+    })
+    AFSection:AddSlider({
+        Text = 'Switch Delay', Flag = 'misc_autofarm_switchdelay', Min = 0.1, Max = 2, Default = 0.3, Rounding = 0.1, Suffix = ' s',
+        Callback = function(v) AutoFarm.SwitchDelay = v end,
+    })
+end
+
+-- ============================================================
+-- AURA KILL
+-- Gửi Slash + Impact packet qua mạng đến các target trong range
+-- ============================================================
+do
+    local AKPage = miscPage('Combat')
+    local AKSection = AKPage:AddSection({ Title = 'Aura Kill', Side = 'Right' })
+
+    local AuraKill = {
+        Enabled = false, Range = 20, Interval = 0, BatchSize = 10,
+        TargetPart = 'Head', Targets = { Zombies = true, NPCs = true, Players = false },
+        _net = nil, _remote = nil, _lastFire = 0, _connection = nil, _running = false,
+    }
+
+    local function AK_FindNet()
+        if AuraKill._net then return AuraKill._net end
+        if shared and type(shared.import) == 'function' then
+            local ok, net = pcall(function() return shared.import('network') end)
+            if ok and net and rawget(net, '_key') and rawget(net, '_code') then
+                AuraKill._net = net; return net
+            end
+        end
+        local ok, gc
+        ok, gc = pcall(function() return filtergc('table') end)
+        if not ok then ok, gc = pcall(function() return getgc(true) end) end
+        if ok and gc then
+            for _, v in pairs(gc) do
+                if type(v) ~= 'table' then continue end
+                local k  = rawget(v, '_key')
+                local co = rawget(v, '_code')
+                local ev = rawget(v, '_events')
+                if type(k) == 'table' and #k >= 5
+                    and type(co) == 'string' and co:match('^%x+%-%x+%-%x+%-%x+%-%x+$')
+                    and type(ev) == 'table'
+                then
+                    local allNums = true
+                    for _, n in ipairs(k) do if type(n) ~= 'number' then allNums = false; break end end
+                    if allNums then AuraKill._net = v; return v end
+                end
+            end
+        end
+        return nil
+    end
+
+    local function AK_GetRemote()
+        if AuraKill._remote and AuraKill._remote.Parent then return AuraKill._remote end
+        local ev = game:GetService('ReplicatedStorage'):FindFirstChild('Events')
+        if ev then
+            local re = ev:FindFirstChild('RemoteEvent')
+            if re then AuraKill._remote = re; return re end
+        end
+        for _, v in ipairs(game:GetService('ReplicatedStorage'):GetDescendants()) do
+            if v:IsA('RemoteEvent') then AuraKill._remote = v; return v end
+        end
+        return nil
+    end
+
+    local function AK_NetEncode(jsonStr, key)
+        local result = ''
+        for i = 1, #jsonStr do
+            local ki   = i % 4
+            local kval = key[ki + 1]
+            local nb   = (string.byte(jsonStr, i) - 32 + kval) % 95 + 32
+            result = result .. string.char(nb)
+        end
+        local firstByte = string.byte(jsonStr, 1)
+        for v24 = 1, key[5] do
+            local v26 = tostring(v24)
+            local v27 = firstByte - string.byte(v26, 1)
+            result = result .. string.char(v27)
+        end
+        return result
+    end
+
+    local function AK_Encrypt(data, net)
+        local hs = game:GetService('HttpService')
+        local ok, raw = pcall(function() return hs:JSONEncode(data) end)
+        if not ok or not raw then return nil end
+        return AK_NetEncode(raw, net._key)
+    end
+
+    local function AK_GetUID(actor)
+        for _, field in ipairs({'UID','_id','Id','UUID'}) do
+            local v = rawget(actor, field)
+            if type(v) == 'string' and v:match('^%x+%-%x+%-%x+%-%x+%-%x+$') then return v end
+        end
+        for k, v in pairs(actor) do
+            if type(v) == 'string' and v:match('^%x+%-%x+%-%x+%-%x+%-%x+$') then return v end
+        end
+        return nil
+    end
+
+    local function AK_Fire(actor)
+        local net = AK_FindNet()
+        if not net then return false end
+        local remote = AK_GetRemote()
+        if not remote then return false end
+        local char = actor.Character
+        if not char then return false end
+        local part = char:FindFirstChild(AuraKill.TargetPart)
+            or char:FindFirstChild('Head') or char:FindFirstChild('UpperTorso') or char.PrimaryPart
+        if not part then return false end
+        local pos = part.Position
+        local uid = AK_GetUID(actor)
+        if not uid then return false end
+        local n = math.random(1, 3)
+        local encSlash = AK_Encrypt({net._code, 'InventoryAction', 'Slash', n}, net)
+        if encSlash then pcall(function() remote:FireServer(encSlash) end) end
+        local encImpact = AK_Encrypt(
+            {net._code, 'InventoryAction', 'Impact', {pos.X, pos.Y, pos.Z}, uid, part.Name},
+            net
+        )
+        if encImpact then pcall(function() remote:FireServer(encImpact) end) end
+        return true
+    end
+
+    local function AK_Tick()
+        if not AuraKill.Enabled then return end
+        local now = tick()
+        if now - AuraKill._lastFire < AuraKill.Interval then return end
+        local c = Combat.Service()
+        local myActor = c and c.Replicator and c.Replicator.LocalActor
+        if not myActor then return end
+        local myPos = myActor.Position or AimCamera.CFrame.Position
+        local candidates = {}
+        local registry = c and c.Replicator and c.Replicator.Actors or {}
+        for _, actor in pairs(registry) do
+            local kind = Combat.Kind(actor)
+            if not kind or not AuraKill.Targets[kind] then continue end
+            if not Combat.IsAlive(actor) or not actor.Character or not actor.Character.Parent then continue end
+            local aPos = actor.Position
+            if not aPos then
+                local ch = actor.Character
+                if ch and ch.PrimaryPart then aPos = ch.PrimaryPart.Position end
+            end
+            if not aPos then continue end
+            local d = (aPos - myPos).Magnitude
+            if d <= AuraKill.Range then
+                table.insert(candidates, {actor = actor, dist = d})
+            end
+        end
+        if #candidates == 0 then return end
+        table.sort(candidates, function(a, b) return a.dist < b.dist end)
+        AuraKill._lastFire = now
+        local count = math.min(AuraKill.BatchSize, #candidates)
+        for i = 1, count do
+            if not AK_Fire(candidates[i].actor) then AuraKill._net = nil end
+        end
+    end
+
+    AKSection:AddToggle({
+        Text = 'Aura Kill', Flag = 'misc_aurakill_enabled', Default = false,
+        Callback = function(v)
+            AuraKill.Enabled = v
+            if v then
+                if AuraKill._connection then return end
+                AuraKill._running = true
+                AuraKill._connection = AimRunService.Heartbeat:Connect(function()
+                    local ok, err = pcall(AK_Tick)
+                    if not ok then warn('[AuraKill]', err) end
+                end)
+                table.insert(Combat.connections, AuraKill._connection)
+            else
+                AuraKill._running = false
+                if AuraKill._connection then
+                    AuraKill._connection:Disconnect(); AuraKill._connection = nil
+                end
+            end
+        end,
+    })
+    AKSection:AddSlider({
+        Text = 'Range', Flag = 'misc_aurakill_range', Min = 1, Max = 200, Default = 20, Rounding = 1, Suffix = ' studs',
+        Callback = function(v) AuraKill.Range = v end,
+    })
+    AKSection:AddSlider({
+        Text = 'Interval', Flag = 'misc_aurakill_interval', Min = 0, Max = 1000, Default = 0, Rounding = 10, Suffix = ' ms',
+        Callback = function(v) AuraKill.Interval = v / 1000 end,
+    })
+    AKSection:AddSlider({
+        Text = 'Batch Size', Flag = 'misc_aurakill_batch', Min = 1, Max = 20, Default = 10, Rounding = 1,
+        Callback = function(v) AuraKill.BatchSize = v end,
+    })
+    AKSection:AddDropdown({
+        Text = 'Target Part', Flag = 'misc_aurakill_part',
+        Options = { 'Head', 'UpperTorso', 'LowerTorso', 'HumanoidRootPart' }, Default = 'Head',
+        Callback = function(v) AuraKill.TargetPart = v end,
+    })
+    AKSection:AddDropdown({
+        Text = 'Targets', Flag = 'misc_aurakill_targets',
+        Options = { 'Zombie', 'NPC', 'Player' }, Default = { 'Zombie', 'NPC' }, Multi = true,
+        Callback = function(values)
+            local map = { Zombie = 'Zombies', NPC = 'NPCs', Player = 'Players' }
+            local selected = {}
+            for k, v in pairs(values or {}) do
+                local name = type(k) == 'number' and v or (v and k)
+                if map[name] then selected[map[name]] = true end
+            end
+            AuraKill.Targets = selected
+        end,
+    })
+
+    addSubtabs('Misc', miscPages)
+end
+
 -- Keep overlay visibility independent from text and performance updates.
 local OverlaySettings={Watermark=true,Keybinds=true}
 local watermark,label=Library.Watermark,Library.WatermarkText
@@ -4591,62 +5363,6 @@ MenuGroup:AddButton('Unload', function() Library:Unload() end)
 MenuGroup:AddLabel('Menu bind'):AddKeyPicker('MenuKeybind', { Default = 'None', NoUI = true, Text = 'Menu keybind' })
 
 Library.ToggleKeybind = Options.MenuKeybind -- Allows you to have a custom keybind for the menu
-
--- ── DPI / UI Scale ────────────────────────────────────────────────────────────
-local DpiGroup = Tabs['UI Settings']:AddRightGroupbox('DPI / UI Scale')
-
-DpiGroup:AddSlider('ui_dpi_scale', {
-    Text     = 'UI Scale',
-    Min      = 50,
-    Max      = 200,
-    Default  = 100,
-    Rounding = 1,
-    Suffix   = '%',
-}):OnChanged(function(value)
-    Library:SetAutoScaleMultiplier(value / 100)
-end)
--- ─────────────────────────────────────────────────────────────────────────────
-
--- Toggle button (same style as libba) — sits in ScreenGui, always visible, toggles the window
-do
-    local TweenService = game:GetService('TweenService')
-    local ToggleBtn = Instance.new('TextButton')
-    ToggleBtn.Name = 'ERISKOIToggle'
-    ToggleBtn.Size = UDim2.fromOffset(70, 22)
-    ToggleBtn.Position = UDim2.fromOffset(10, 10)
-    ToggleBtn.BackgroundColor3 = Library.MainColor
-    ToggleBtn.BorderColor3 = Library.AccentColor
-    ToggleBtn.BorderSizePixel = 1
-    ToggleBtn.Text = '☰ UI'
-    ToggleBtn.TextColor3 = Library.FontColor
-    ToggleBtn.TextSize = 13
-    ToggleBtn.Font = Enum.Font.Code
-    ToggleBtn.ZIndex = 999
-    ToggleBtn.AutoButtonColor = false
-    ToggleBtn.Parent = Library.ScreenGui
-
-    Library:AddToRegistry(ToggleBtn, {
-        BackgroundColor3 = 'MainColor',
-        BorderColor3    = 'AccentColor',
-        TextColor3      = 'FontColor',
-    })
-
-    -- Sync label with menu state
-    local function SyncLabel()
-        ToggleBtn.Text = Library.MenuOpen and '✕ UI' or '☰ UI'
-    end
-
-    ToggleBtn.MouseButton1Click:Connect(function()
-        task.spawn(function() Library:Toggle() end)
-        task.delay(Library.MenuOpen and 0 or 0.22, SyncLabel)
-    end)
-
-    -- Keep button in front after theme color updates
-    Library:GiveSignal(game:GetService('RunService').RenderStepped:Connect(function()
-        if ToggleBtn.Parent == nil then return end
-        ToggleBtn.Visible = true
-    end))
-end
 
 -- Addons:
 -- SaveManager (Allows you to have a configuration system)
