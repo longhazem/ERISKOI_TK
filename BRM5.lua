@@ -4592,6 +4592,21 @@ MenuGroup:AddLabel('Menu bind'):AddKeyPicker('MenuKeybind', { Default = 'None', 
 
 Library.ToggleKeybind = Options.MenuKeybind -- Allows you to have a custom keybind for the menu
 
+-- ── DPI / UI Scale ────────────────────────────────────────────────────────────
+local DpiGroup = Tabs['UI Settings']:AddRightGroupbox('DPI / UI Scale')
+
+DpiGroup:AddSlider('ui_dpi_scale', {
+    Text     = 'UI Scale',
+    Min      = 50,
+    Max      = 200,
+    Default  = 100,
+    Rounding = 1,
+    Suffix   = '%',
+}):OnChanged(function(value)
+    Library:SetAutoScaleMultiplier(value / 100)
+end)
+-- ─────────────────────────────────────────────────────────────────────────────
+
 -- Toggle button (same style as libba) — sits in ScreenGui, always visible, toggles the window
 do
     local TweenService = game:GetService('TweenService')
