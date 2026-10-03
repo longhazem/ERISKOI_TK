@@ -997,17 +997,10 @@ addSubtabs('Ragebot', {
 do
 local Sense = (function()
     local E: {[string]: any} = {
-        _hasLoaded = false, objects = {}, errors = {}, scanAt = 0, highlights = {}, useHighlight = false,
+        _hasLoaded = false, objects = {}, errors = {}, scanAt = 0,
         sharedSettings = {textSize=13, textFont=2,
             teamBasedColor=false, neutralColor=Color3.fromRGB(100,220,150)},
         teamSettings = {}, chams = {}, advanced = {},
-        -- Zombie type colors: [1]=Crippled [2]=Slow [3]=Normal [4]=Sprinter
-        zombieColors = {
-            [1]=Color3.fromRGB(148,74,0),
-            [2]=Color3.fromRGB(255,255,0),
-            [3]=Color3.fromRGB(255,0,0),
-            [4]=Color3.fromRGB(148,0,255),
-        },
     }
     local white, black = Color3.new(1,1,1), Color3.new(0,0,0)
     local t = {
@@ -1043,6 +1036,53 @@ local Sense = (function()
         E.teamSettings[kind].distance=true
         E.chams[kind]=table.clone(E.chams.npc)
         E.advanced[kind]=table.clone(E.advanced.npc)
+    end
+    -- Highlight ESP
+    E.highlights={}
+    E.highlightSettings={npc=false,players=false,zombies=false,corpses=false}
+    -- Zombie ability index: 1=Crippled 2=Slow 3=Normal 4=Sprinter
+    E.zombieAbilityColors={
+        [1]=Color3.fromRGB(160,100,60),
+        [2]=Color3.fromRGB(255,220,50),
+        [3]=Color3.fromRGB(220,50,50),
+        [4]=Color3.fromRGB(180,60,220),
+    }
+    local function hl_colorForActor(actor,kind)
+        if kind=="zombies" or kind=="corpses" then
+            local ab=type(actor.Health)=="table" and actor.Health.Ability
+            return (ab and E.zombieAbilityColors[ab]) or Color3.fromRGB(220,50,50)
+        elseif kind=="players" then
+            return Color3.fromRGB(255,165,0)
+        end
+        return Color3.fromRGB(100,220,150)
+    end
+    function E.UpdateHighlights()
+        local alive={}
+        local c=E.Service()
+        for _,actor in pairs(c and c.Replicator and c.Replicator.Actors or {}) do
+            local kind=E.Kind(actor)
+            if kind and E.highlightSettings[kind] and actor.Character and actor.Character.Parent then
+                alive[actor]=true
+                local hl=E.highlights[actor]
+                if not hl or not hl.Parent then
+                    hl=Instance.new("Highlight")
+                    hl.FillTransparency=0.88
+                    hl.OutlineTransparency=0
+                    pcall(function() hl.DepthMode=Enum.HighlightDepthMode.AlwaysOnTop end)
+                    hl.Parent=actor.Character
+                    E.highlights[actor]=hl
+                end
+                local col=hl_colorForActor(actor,kind)
+                hl.FillColor=col
+                hl.OutlineColor=col
+            end
+        end
+        for actor,hl in pairs(E.highlights) do
+            if not alive[actor] then
+                pcall(function() if hl.Parent then hl:Destroy() end end)
+                E.highlights[actor]=nil
+            end
+        end
     end
     local service, resolveAt, connection, anchor
     local signs = {Vector3.new(-1,-1,-1),Vector3.new(-1,1,-1),Vector3.new(-1,1,1),Vector3.new(-1,-1,1),
@@ -1554,15 +1594,7 @@ local Sense = (function()
         local shared=E.sharedSettings
         if t.limitDistance and dist>t.maxDistance then return end
         local adv=E.advanced[kind]
-        -- Zombie ability-based color (tipmobile ZombieColors logic)
-        local zombieAbilityOverride = nil
-        if kind == "zombies" and not shared.teamBasedColor then
-            local ability = type(a.Health) == "table" and a.Health.Ability
-            if ability and Sense.zombieColors and Sense.zombieColors[ability] then
-                zombieAbilityOverride = Sense.zombieColors[ability]
-            end
-        end
-        local override=(zombieAbilityOverride) or (shared.teamBasedColor and (o.preview and a.PreviewTeamColor or E.TeamColor(a)) or nil)
+        local override=shared.teamBasedColor and (o.preview and a.PreviewTeamColor or E.TeamColor(a)) or nil
         local delta=root and position-root.Position or Vector3.zero
         local view=camera.ViewportSize
         local sp,onScreen=camera:WorldToViewportPoint(position)
@@ -1630,10 +1662,7 @@ local Sense = (function()
                     label=a.DisplayName or (a.OwnerName~="???" and a.OwnerName) or (a.Zombie and "Zombie" or "NPC")
                     if not o.preview then label=tostring(label).." ["..tostring(a.UID):sub(1,6).."]" end
                 end
-                if kind=="zombies" then
-                    local abilityLabels={[1]="Crippled",[2]="Slow",[3]="Normal",[4]="Sprinter"}
-                    local ability=type(a.Health)=="table" and a.Health.Ability
-                    label=ability and ("Zombie ["..( abilityLabels[ability] or tostring(ability)).."]") or "Zombie"
+                if kind=="zombies" then label="Zombie"
                 elseif kind=="corpses" then label="Corpse: "..(a.Zombie and "Zombie" or (E.IsPlayer(a) and a.Owner.Name or "NPC")) end
                 textAt(o,"name",label,Vector2.new(cx,min.Y-shared.textSize-3),t.nameColor,t.nameOutline,override)
             end
@@ -1663,55 +1692,7 @@ local Sense = (function()
                 if not E.errors[tostring(err)] then E.errors[tostring(err)]=true;warn("[NPC ESP]",err) end
             end
         end
-        -- Highlight ESP: create/update/destroy per actor (tipmobile CreateHighlight logic)
-        if E.useHighlight then
-            local activeUIDs = {}
-            for actor, o in pairs(E.objects) do
-                if not o.preview and actor.Character and actor.Character.Parent then
-                    local uid = actor.UID
-                    activeUIDs[uid] = true
-                    local hl = E.highlights[uid]
-                    -- determine color: zombie ability first, then teamSettings boxColor
-                    local kind = E.Kind(actor)
-                    local color = Color3.new(1,1,1)
-                    if kind == "zombies" then
-                        local ability = type(actor.Health)=="table" and actor.Health.Ability
-                        color = (ability and E.zombieColors[ability]) or Color3.new(1,0,0)
-                    elseif kind == "players" then
-                        color = Color3.fromRGB(255,165,0)
-                    elseif kind == "npc" then
-                        color = Color3.fromRGB(255,255,0)
-                    end
-                    if not hl or not hl.Parent then
-                        local newHl = Instance.new("Highlight")
-                        newHl.FillColor = color
-                        newHl.FillTransparency = 0.6
-                        newHl.OutlineColor = color
-                        newHl.OutlineTransparency = 0
-                        pcall(function() newHl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop end)
-                        newHl.Parent = actor.Character
-                        E.highlights[uid] = newHl
-                    else
-                        hl.FillColor = color
-                        hl.OutlineColor = color
-                        hl.Enabled = true
-                    end
-                end
-            end
-            -- Cleanup orphaned highlights
-            for uid, hl in pairs(E.highlights) do
-                if not activeUIDs[uid] then
-                    pcall(function() hl:Destroy() end)
-                    E.highlights[uid] = nil
-                end
-            end
-        else
-            -- Ensure all highlights destroyed when feature disabled
-            for uid, hl in pairs(E.highlights) do
-                pcall(function() hl:Destroy() end)
-                E.highlights[uid] = nil
-            end
-        end
+        E.UpdateHighlights()
     end
     function E.Load()
         if E._hasLoaded then return end
@@ -1724,11 +1705,8 @@ local Sense = (function()
         for a,o in pairs(E.objects) do destroy(o);E.objects[a]=nil end
         if anchor then anchor:Destroy();anchor=nil end
         if E.textGui then E.textGui:Destroy(); E.textGui=nil end
-        -- Destroy all Highlight instances on unload
-        for uid, hl in pairs(E.highlights) do
-            pcall(function() hl:Destroy() end)
-            E.highlights[uid] = nil
-        end
+        for _,hl in pairs(E.highlights) do pcall(function() if hl.Parent then hl:Destroy() end end) end
+        table.clear(E.highlights)
         E._hasLoaded=false
     end
     function E.CreatePreviewObject(actor,factory)
@@ -1929,6 +1907,8 @@ end
 local NpcGeneral = NpcPage:AddSection({Title="General",Side="Left"})
 NpcGeneral:AddToggle({Text="ESP Enabled",Flag="npc_enabled",Default=true,
     Callback=function(v) Sense.teamSettings.npc.enabled=v end})
+NpcGeneral:AddToggle({Text="Highlight ESP",Flag="npc_highlight",Default=false,
+    Callback=function(v) Sense.highlightSettings.npc=v end})
 addESPDistance(NpcGeneral,"npc")
 local function buildTeamPage(page, team)
     local t     = Sense.teamSettings[team]
@@ -2258,6 +2238,8 @@ buildTeamPage(NpcPage,"npc")
 local PlayerGeneral=PlayersPage:AddSection({Title="General",Side="Left"})
 PlayerGeneral:AddToggle({Text="ESP Enabled",Flag="players_enabled",Default=false,
     Callback=function(v) Sense.teamSettings.players.enabled=v end})
+PlayerGeneral:AddToggle({Text="Highlight ESP",Flag="players_highlight",Default=false,
+    Callback=function(v) Sense.highlightSettings.players=v end})
 addESPDistance(PlayerGeneral,"players")
 PlayerGeneral:AddToggle({Text="Team Check",Flag="players_team_check",Default=false,
     Callback=function(v) Sense.teamSettings.players.teamCheck=v end})
@@ -2267,34 +2249,30 @@ for _,entry in ipairs({{ZombiePage,"zombies"},{CorpsePage,"corpses"}}) do
     local general=page:AddSection({Title="General",Side="Left"})
     general:AddToggle({Text="ESP Enabled",Flag=kind.."_enabled",Default=false,
         Callback=function(v) Sense.teamSettings[kind].enabled=v end})
+    general:AddToggle({Text="Highlight ESP",Flag=kind.."_highlight",Default=false,
+        Callback=function(v) Sense.highlightSettings[kind]=v end})
     addESPDistance(general,kind)
-    buildTeamPage(page,kind)
-end
-
--- Zombie type-based color classification (tipmobile ZombieColors logic)
-do
-    local ZombieColorSection = ZombiePage:AddSection({Title="Zombie Type Colors",Side="Right"})
-    ZombieColorSection:AddToggle({
-        Text="Highlight ESP",
-        Flag="zombies_highlight_esp",
-        Default=false,
-        Callback=function(v) Sense.useHighlight=v end
-    })
-    local zTypeNames = {[1]="Crippled",[2]="Slow",[3]="Normal",[4]="Sprinter"}
-    local zTypeDefaults = {
-        [1]=Color3.fromRGB(148,74,0),
-        [2]=Color3.fromRGB(255,255,0),
-        [3]=Color3.fromRGB(255,0,0),
-        [4]=Color3.fromRGB(148,0,255),
-    }
-    for i=1,4 do
-        ZombieColorSection:AddColorPicker({
-            Text="Z: "..zTypeNames[i],
-            Flag="zombie_color_type_"..i,
-            Default=zTypeDefaults[i],
-            Callback=function(v) Sense.zombieColors[i]=v end
-        })
+    -- Zombie type color pickers: each colorpicker MUST follow its own toggle (lastToggle assert)
+    if kind=="zombies" then
+        local zcolors=page:AddSection({Title="Zombie Type Colors",Side="Right"})
+        zcolors:AddToggle({Text="Crippled",Flag="zombie_crippled_on",Default=true,Callback=function()end})
+        zcolors:AddColorPicker({Text="Crippled Color",Flag="zombie_color_crippled",
+            Default=Sense.zombieAbilityColors[1],
+            Callback=function(c) Sense.zombieAbilityColors[1]=c end})
+        zcolors:AddToggle({Text="Slow",Flag="zombie_slow_on",Default=true,Callback=function()end})
+        zcolors:AddColorPicker({Text="Slow Color",Flag="zombie_color_slow",
+            Default=Sense.zombieAbilityColors[2],
+            Callback=function(c) Sense.zombieAbilityColors[2]=c end})
+        zcolors:AddToggle({Text="Normal",Flag="zombie_normal_on",Default=true,Callback=function()end})
+        zcolors:AddColorPicker({Text="Normal Color",Flag="zombie_color_normal",
+            Default=Sense.zombieAbilityColors[3],
+            Callback=function(c) Sense.zombieAbilityColors[3]=c end})
+        zcolors:AddToggle({Text="Sprinter",Flag="zombie_sprinter_on",Default=true,Callback=function()end})
+        zcolors:AddColorPicker({Text="Sprinter Color",Flag="zombie_color_sprinter",
+            Default=Sense.zombieAbilityColors[4],
+            Callback=function(c) Sense.zombieAbilityColors[4]=c end})
     end
+    buildTeamPage(page,kind)
 end
 -- Settings page ───────────────────────────────────────────────
 local SharedLeft = SharedPage:AddSection({Title = "Settings", Side = "Left"})
@@ -3695,169 +3673,48 @@ do
             for k,v in pairs(values or {}) do local name=type(k)=="number" and v or (v and k);if map[name] then selected[map[name]]=true end end
             A.Targets=selected
         end})
-
-    -- ── AuraKill — Cipher verified (tipmobile Flux_client.lua logic) ─────────
-    do
-        local AK={
-            Enabled=false, Range=5, Interval=0, BatchSize=10, TargetPart="Head",
-            _net=nil, _remote=nil, _lastFire=0, _connection=nil, _running=false,
-        }
-        local function AK_FindNet()
-            if AK._net then return AK._net end
-            if shared and type(shared.import)=="function" then
-                local ok,net=pcall(function() return shared.import("network") end)
-                if ok and net and rawget(net,"_key") and rawget(net,"_code") then
-                    AK._net=net; return net
-                end
-            end
-            local gok,gc=pcall(function() return filtergc("table") end)
-            if not gok then gok,gc=pcall(function() return getgc(true) end) end
-            if gok and gc then
-                for _,v in pairs(gc) do
-                    if type(v)~="table" then continue end
-                    local k=rawget(v,"_key"); local co=rawget(v,"_code"); local ev=rawget(v,"_events")
-                    if type(k)=="table" and #k>=5
-                        and type(co)=="string" and co:match("^%x+%-%x+%-%x+%-%x+%-%x+$")
-                        and type(ev)=="table"
-                    then
-                        local allNums=true
-                        for _,n in ipairs(k) do if type(n)~="number" then allNums=false; break end end
-                        if allNums then AK._net=v; return v end
-                    end
-                end
-            end
-            return nil
-        end
-        local function AK_GetRemote()
-            if AK._remote and AK._remote.Parent then return AK._remote end
-            local ev=game:GetService("ReplicatedStorage"):FindFirstChild("Events")
-            if ev then
-                local re=ev:FindFirstChild("RemoteEvent")
-                if re then AK._remote=re; return re end
-            end
-            for _,v in ipairs(game:GetService("ReplicatedStorage"):GetDescendants()) do
-                if v:IsA("RemoteEvent") then AK._remote=v; return v end
-            end
-            return nil
-        end
-        -- netEncode: Flux_client.lua lines 31-50
-        local function AK_NetEncode(jsonStr,key)
-            local result=""
-            for i=1,#jsonStr do
-                local ki=i%4
-                local kval=key[ki+1]
-                local nb=(string.byte(jsonStr,i)-32+kval)%95+32
-                result=result..string.char(nb)
-            end
-            local firstByte=string.byte(jsonStr,1)
-            for v24=1,key[5] do
-                local v26=tostring(v24)
-                local v27=firstByte-string.byte(v26,1)
-                result=result..string.char(v27)
-            end
-            return result
-        end
-        local function AK_Encrypt(data,net)
-            local hs=game:GetService("HttpService")
-            local ok,raw=pcall(function() return hs:JSONEncode(data) end)
-            if not ok or not raw then return nil end
-            return AK_NetEncode(raw,net._key)
-        end
-        local function AK_GetUID(a)
-            for _,field in ipairs({"UID","_id","Id","UUID"}) do
-                local v=rawget(a,field)
-                if type(v)=="string" and v:match("^%x+%-%x+%-%x+%-%x+%-%x+$") then return v end
-            end
-            for k,v in pairs(a) do
-                if type(v)=="string" and v:match("^%x+%-%x+%-%x+%-%x+%-%x+$") then return v end
-            end
-            return nil
-        end
-        local function AK_Fire(a)
-            local net=AK_FindNet(); if not net then return false end
-            local remote=AK_GetRemote(); if not remote then return false end
-            local char=a.Character; if not char then return false end
-            local part=char:FindFirstChild(AK.TargetPart)
-                or char:FindFirstChild("Head") or char:FindFirstChild("UpperTorso") or char.PrimaryPart
-            if not part then return false end
-            local pos=part.Position
-            local uid=AK_GetUID(a); if not uid then return false end
-            local n=math.random(1,3)
-            local encSlash=AK_Encrypt({net._code,"InventoryAction","Slash",n},net)
-            if encSlash then pcall(function() remote:FireServer(encSlash) end) end
-            local encImpact=AK_Encrypt({net._code,"InventoryAction","Impact",{pos.X,pos.Y,pos.Z},uid,part.Name},net)
-            if encImpact then pcall(function() remote:FireServer(encImpact) end) end
-            return true
-        end
-        local function AK_Tick()
-            if not AK.Enabled then return end
-            local now=tick()
-            if now-AK._lastFire<AK.Interval then return end
-            local myActor=actor()
-            if not myActor then return end
-            local myPos=myActor.Position or AimCamera.CFrame.Position
-            local candidates={}
-            local c=Combat.Service()
-            local registry=c and c.Replicator and c.Replicator.Actors
-            if not registry then return end
-            for _,a in pairs(registry) do
-                if not a or not a.Alive or not a.Character then continue end
-                if a.IsLocalPlayer or a==myActor then continue end
-                local aPos=a.Position
-                if not aPos and a.Character.PrimaryPart then aPos=a.Character.PrimaryPart.Position end
-                if not aPos then continue end
-                local d=(aPos-myPos).Magnitude
-                if d<=AK.Range then
-                    candidates[#candidates+1]={Actor=a,Distance=d}
-                end
-            end
-            if #candidates==0 then return end
-            table.sort(candidates,function(a,b) return a.Distance<b.Distance end)
-            AK._lastFire=now
-            local count=math.min(AK.BatchSize,#candidates)
-            for i=1,count do
-                local target=candidates[i].Actor
-                task.spawn(function()
-                    if not AK_Fire(target) then AK._net=nil end
-                end)
-            end
-        end
-        local function AK_Start()
-            if AK._running then return end
-            AK._running=true
-            task.spawn(AK_FindNet); task.spawn(AK_GetRemote)
-            AK._connection=AimRunService.Heartbeat:Connect(AK_Tick)
-            table.insert(Combat.connections,AK._connection)
-        end
-        local function AK_Stop()
-            AK._running=false
-            if AK._connection then
-                pcall(function() AK._connection:Disconnect() end)
-                AK._connection=nil
-            end
-        end
-        getgenv().ERISKOI_AuraKill=AK
-        local mAK=MeleePage:AddSection({Title="Aura Kill",Side="Left"})
-        mAK:AddToggle({Text="Enable Aura Kill",Flag="ak_enabled",Default=false,
-            Callback=function(v) AK.Enabled=v; if v then AK_Start() else AK_Stop() end end})
-        mAK:AddSlider({Text="Range (studs)",Flag="ak_range",Min=1,Max=10,Default=5,Rounding=0,
-            Callback=function(v) AK.Range=v end})
-        mAK:AddSlider({Text="Attack Rate (ms)",Flag="ak_interval",Min=0,Max=2000,Default=0,Rounding=0,
-            Callback=function(v) AK.Interval=v/1000 end})
-        mAK:AddDropdown({Text="Target Part",Flag="ak_target_part",Options={"Head","UpperTorso","LowerTorso"},Default="Head",
-            Callback=function(v) AK.TargetPart=v end})
-        mAK:AddButton("Rescan Network",function()
-            AK._net=nil; AK._remote=nil
-            task.spawn(function()
-                local net=AK_FindNet(); local re=AK_GetRemote()
-                Library:Notify(net and re
-                    and "AuraKill OK: code="..net._code:sub(1,8)
-                    or "AuraKill: Network scan failed",4)
-            end)
+    -- Aura Kill (Net) — new right section in MeleePage
+    local mak=mp:AddSection({Title="Aura Kill (Net)",Side="Right"})
+    mak:AddToggle({Text="Enable Aura Kill",Flag="ak_enabled",Default=false,
+        Callback=function(v) AuraKillEx.Enabled=v;if v then AKEx_Start() else AKEx_Stop() end end})
+    mak:AddSlider({Text="Range",Flag="ak_range",Min=1,Max=100,Default=20,Rounding=1,Suffix=" studs",
+        Callback=function(v) AuraKillEx.Range=v end})
+    mak:AddSlider({Text="Rate Limit",Flag="ak_interval",Min=0,Max=2000,Default=0,Rounding=0,Suffix=" ms",
+        Callback=function(v) AuraKillEx.Interval=v/1000 end})
+    mak:AddSlider({Text="Batch Size",Flag="ak_batch",Min=1,Max=20,Default=10,Rounding=0,Suffix="",
+        Callback=function(v) AuraKillEx.BatchSize=v end})
+    mak:AddDropdown({Text="Target Part",Flag="ak_part",Options={"Head","UpperTorso","LowerTorso"},Default="Head",
+        Callback=function(v) AuraKillEx.TargetPart=v end})
+    -- Rescan button — reach Linoria group via MeleePage.Groups last entry
+    mp.Groups[#mp.Groups]:AddButton("Rescan Network",function()
+        AuraKillEx._net=nil;AuraKillEx._remote=nil
+        task.spawn(function()
+            local net=AKEx_FindNet();local re=AKEx_GetRemote()
+            Library:Notify(net and re and ("AuraKill OK — "..net._code:sub(1,8)) or "AuraKill: net not found")
         end)
-    end
-
+    end)
     local vp=VehiclePage
+    -- Vehicle Teleporter — new left section in VehiclePage
+    local vtSec=vp:AddSection({Title="Vehicle Teleporter",Side="Left"})
+    -- section:AddToggle sets lastToggle; buttons go through the Linoria group directly
+    local vtGroup=vp.Groups[#vp.Groups]
+    vtGroup:AddButton("Save Vehicle Position",function()
+        local model=VT_GetVehicle()
+        if model and model.PrimaryPart then
+            VehicleTeleporter._saved=model.PrimaryPart.CFrame
+            Library:Notify("Vehicle position saved")
+        else Library:Notify("Not in a vehicle") end
+    end)
+    vtGroup:AddButton("Teleport to Saved",function()
+        if not VehicleTeleporter._saved then Library:Notify("No saved position");return end
+        local model=VT_GetVehicle()
+        if model and model.PrimaryPart then
+            pcall(function() model:PivotTo(VehicleTeleporter._saved) end)
+        else Library:Notify("Not in a vehicle") end
+    end)
+    vtGroup:AddButton("Clear Saved",function()
+        VehicleTeleporter._saved=nil;Library:Notify("Cleared")
+    end)
     local vl=vp:AddSection({Title="Driving",Side="Left"});local vr=vp:AddSection({Title="Flight",Side="Right"})
     toggle(vl,"Speed Mod",V,"Speed","vehicle_speed")
     slider(vl,"Speed",V,"SpeedValue","vehicle_speed_value",1,250,80,1," studs/s")
@@ -3868,107 +3725,6 @@ do
     V.key=vr:AddKeyPicker({Text="Vehicle Fly Key",Flag="vehicle_fly_key",Default="None",Mode="Toggle",Callback=function() end})
     slider(vr,"Fly Speed",V,"FlySpeed","vehicle_fly_speed",1,2000,60,1," studs/s")
     toggle(vr,"Vehicle Noclip",V,"Noclip","vehicle_noclip")
-
-    -- ── Vehicle Teleporter (tipmobile VehicleTeleport logic) ─────────────────
-    do
-        local VT={_savedCF=nil}
-        local function VT_GetVehicle()
-            local c=Combat.Service()
-            local localActor=c and c.Replicator and c.Replicator.LocalActor
-            if not localActor then return nil end
-            local seat=localActor.Seat
-            if not seat then return nil end
-            local uid=seat.UID
-            -- Method 1: VehicleService registry
-            local gok,gc2=pcall(function() return getgc(true) end)
-            if gok and gc2 then
-                for _,obj in pairs(gc2) do
-                    if type(obj)=="table"
-                        and rawget(obj,"Vehicles") and rawget(obj,"Changed")
-                    then
-                        for _,veh in pairs(obj.Vehicles) do
-                            if rawget(veh,"UID")==uid then return veh end
-                        end
-                    end
-                end
-            end
-            -- Method 2: GC scan for active controller
-            if gok and gc2 then
-                for _,obj in pairs(gc2) do
-                    if type(obj)=="table"
-                        and rawget(obj,"Controlling")==true
-                        and rawget(obj,"ComponentReplicates")~=nil
-                        and (rawget(obj,"SetRPM") or rawget(obj,"_updateLightModes") or rawget(obj,"Hitbox"))
-                    then
-                        return obj
-                    end
-                end
-            end
-            return nil
-        end
-        local function VT_GetSolver(vehicle)
-            local gok,gc2=pcall(function() return getgc(true) end)
-            if not gok or not gc2 then return nil end
-            for _,obj in pairs(gc2) do
-                if type(obj)=="table"
-                    and rawget(obj,"_vehicle")==vehicle
-                    and rawget(obj,"_solver")
-                then
-                    return obj._solver
-                end
-            end
-            return nil
-        end
-        local function TeleportVehicle(targetCF)
-            local vehicle=VT_GetVehicle()
-            if not vehicle then
-                Library:Notify("Vehicle Teleport: Get in a vehicle first!",3)
-                return
-            end
-            pcall(function()
-                vehicle.CFrame=targetCF
-                if vehicle.Hitbox then vehicle.Hitbox.CFrame=targetCF end
-            end)
-            pcall(function()
-                local solver=VT_GetSolver(vehicle)
-                if solver and solver.SetState then
-                    solver:SetState(targetCF,Vector3.new(0,0,0),Vector3.new(0,0,0),vehicle.ComponentReplicates)
-                end
-            end)
-            pcall(function()
-                local c=Combat.Service()
-                local la=c and c.Replicator and c.Replicator.LocalActor
-                if la then la.SimulatedPosition=targetCF.Position end
-            end)
-            Library:Notify("Vehicle teleported!",2)
-        end
-        getgenv().ERISKOI_VehicleTeleport=VT
-        local vtSection=vp:AddSection({Title="Vehicle Teleporter",Side="Right"})
-        vtSection:AddButton("Lưu Toạ Độ",function()
-            local vehicle=VT_GetVehicle()
-            if vehicle then
-                local cf=vehicle.CFrame or (vehicle.Hitbox and vehicle.Hitbox.CFrame)
-                if cf then VT._savedCF=cf; Library:Notify("Đã lưu toạ độ xe!",2); return end
-            end
-            local c=Combat.Service()
-            local la=c and c.Replicator and c.Replicator.LocalActor
-            if la and la.Character then
-                local root=la.Character.PrimaryPart
-                if root then VT._savedCF=root.CFrame; Library:Notify("Đã lưu toạ độ nhân vật!",2); return end
-            end
-            Library:Notify("Không tìm được toạ độ!",3)
-        end)
-        vtSection:AddButton("Teleport Phương Tiện",function()
-            if not VT._savedCF then
-                Library:Notify("Chưa lưu toạ độ!",3); return
-            end
-            TeleportVehicle(VT._savedCF)
-        end)
-        vtSection:AddButton("Xóa Toạ Độ",function()
-            VT._savedCF=nil; Library:Notify("Đã xóa toạ độ!",2)
-        end)
-    end
-
     local tp=TurretPage
     local ts=tp:AddSection({Title="Turret",Side="Left"})
     toggle(ts,"Turret RPM Changer",T,"RPM","turret_rpm_enabled")
@@ -4336,6 +4092,147 @@ table.insert(Combat.connections,AimRunService.RenderStepped:Connect(function()
 end))
 
 
+-- ── Night Vision ──────────────────────────────────────────────
+local NVG={Enabled=false,Color="Green",_effect=nil,
+    Colors={Green=Color3.fromRGB(112,245,65),Blue=Color3.fromRGB(165,233,255)}}
+local function NVG_Apply()
+    local lighting=game:GetService("Lighting")
+    if NVG.Enabled then
+        if not NVG._effect or not NVG._effect.Parent then
+            NVG._effect=Instance.new("ColorCorrectionEffect")
+            NVG._effect.Name="ERISKOI_NightVision"
+            NVG._effect.Parent=lighting
+        end
+        NVG._effect.TintColor=NVG.Colors[NVG.Color] or NVG.Colors.Green
+        NVG._effect.Brightness=0.15
+        NVG._effect.Contrast=0.5
+        NVG._effect.Saturation=-1
+        NVG._effect.Enabled=true
+    else
+        if NVG._effect and NVG._effect.Parent then NVG._effect.Enabled=false end
+    end
+end
+
+-- ── Auto Remove Tree ──────────────────────────────────────────
+local AutoTree={Enabled=false,_conn=nil,
+    _prefixes={"arb","qradbiq","oradbbig","oragedbbig"}}
+local function AutoTree_Match(name)
+    local low=name:lower()
+    for _,p in ipairs(AutoTree._prefixes) do if low:sub(1,#p)==p then return true end end
+    return false
+end
+local function AutoTree_Delete()
+    for _,obj in pairs(workspace:GetDescendants()) do
+        if obj and obj.Parent and AutoTree_Match(obj.Name) then
+            if obj:IsA("Model") or obj:IsA("BasePart") or obj:IsA("Folder") then
+                pcall(function() obj:Destroy() end)
+            end
+        end
+    end
+end
+
+-- ── Vehicle Teleporter ────────────────────────────────────────
+local VehicleTeleporter={_saved=nil}
+local function VT_GetVehicle()
+    local c=Combat.Service();local me=c and c.Replicator and c.Replicator.LocalActor
+    if not me then return nil end
+    local seat=rawget(me,"Seat") or (type(me.Seat)~="nil" and me.Seat)
+    return seat and seat.Model
+end
+
+-- ── Aura Kill (Network Cipher) ────────────────────────────────
+local AuraKillEx={
+    Enabled=false,Range=20,Interval=0,BatchSize=10,TargetPart="Head",
+    _net=nil,_remote=nil,_lastFire=0,_conn=nil,_running=false,
+}
+local function AKEx_FindNet()
+    if AuraKillEx._net then return AuraKillEx._net end
+    local gok,gc=pcall(function() return filtergc("table") end)
+    if not gok then gok,gc=pcall(function() return getgc(true) end) end
+    if gok and gc then
+        for _,v in pairs(gc) do
+            if type(v)~="table" then continue end
+            local k=rawget(v,"_key");local co=rawget(v,"_code");local ev=rawget(v,"_events")
+            if type(k)=="table" and #k>=5
+                and type(co)=="string" and co:match("^%x+%-%x+%-%x+%-%x+%-%x+$")
+                and type(ev)=="table"
+            then
+                local ok=true
+                for _,n in ipairs(k) do if type(n)~="number" then ok=false;break end end
+                if ok then AuraKillEx._net=v;return v end
+            end
+        end
+    end
+end
+local function AKEx_GetRemote()
+    if AuraKillEx._remote and AuraKillEx._remote.Parent then return AuraKillEx._remote end
+    for _,v in ipairs(game:GetService("ReplicatedStorage"):GetDescendants()) do
+        if v:IsA("RemoteEvent") then AuraKillEx._remote=v;return v end
+    end
+end
+local function AKEx_NetEncode(json,key)
+    local r=""
+    for i=1,#json do r=r..string.char((string.byte(json,i)-32+key[i%4+1])%95+32) end
+    local first=string.byte(json,1)
+    for i=1,key[5] do r=r..string.char(first-string.byte(tostring(i),1)) end
+    return r
+end
+local function AKEx_Fire(actor)
+    local net=AKEx_FindNet();if not net then return false end
+    local re=AKEx_GetRemote();if not re then return false end
+    local char=actor.Character;if not char then return false end
+    local part=char:FindFirstChild(AuraKillEx.TargetPart) or char:FindFirstChild("Head") or char.PrimaryPart
+    if not part then return false end
+    local pos=part.Position
+    local uid=rawget(actor,"UID") or rawget(actor,"_id") or rawget(actor,"Id")
+    if type(uid)~="string" then return false end
+    local hs=game:GetService("HttpService")
+    pcall(function()
+        local raw=hs:JSONEncode({net._code,"InventoryAction","Slash",math.random(1,3)})
+        re:FireServer(AKEx_NetEncode(raw,net._key))
+    end)
+    pcall(function()
+        local raw=hs:JSONEncode({net._code,"InventoryAction","Impact",{pos.X,pos.Y,pos.Z},uid,part.Name})
+        re:FireServer(AKEx_NetEncode(raw,net._key))
+    end)
+    return true
+end
+local function AKEx_Tick()
+    if not AuraKillEx.Enabled then return end
+    local now=tick();if now-AuraKillEx._lastFire<AuraKillEx.Interval then return end
+    local c=Combat.Service();if not c then return end
+    local me=c.Replicator and c.Replicator.LocalActor;if not me then return end
+    local myPos=me.Position or AimCamera.CFrame.Position
+    local cands={}
+    for _,actor in pairs(c.Replicator.Actors or {}) do
+        if Combat.Kind(actor) and Combat.IsAlive(actor) and actor.Character then
+            local ap=actor.Position or (actor.Character.PrimaryPart and actor.Character.PrimaryPart.Position)
+            if ap and (ap-myPos).Magnitude<=AuraKillEx.Range then
+                cands[#cands+1]={a=actor,d=(ap-myPos).Magnitude}
+            end
+        end
+    end
+    if #cands==0 then return end
+    table.sort(cands,function(a,b) return a.d<b.d end)
+    AuraKillEx._lastFire=now
+    for i=1,math.min(AuraKillEx.BatchSize,#cands) do
+        task.spawn(function()
+            if not AKEx_Fire(cands[i].a) then AuraKillEx._net=nil end
+        end)
+    end
+end
+local function AKEx_Start()
+    if AuraKillEx._running then return end
+    AuraKillEx._running=true
+    task.spawn(AKEx_FindNet);task.spawn(AKEx_GetRemote)
+    AuraKillEx._conn=AimRunService.Heartbeat:Connect(AKEx_Tick)
+    table.insert(Combat.connections,AuraKillEx._conn)
+end
+local function AKEx_Stop()
+    AuraKillEx._running=false
+    if AuraKillEx._conn then pcall(function() AuraKillEx._conn:Disconnect() end);AuraKillEx._conn=nil end
+end
+
 do
 local WMLighting = game:GetService("Lighting")
 local VisualsPage = legacyPage(Tabs.Mods, modPages, 'World Mods')
@@ -4585,6 +4482,39 @@ end
 table.insert(Combat.connections, AimRunService.RenderStepped:Connect(WM.Apply))
 
 -- ── World ─────────────────────────────────────────────────────
+-- Night Vision — new section in World Mods page (legacyPage → Mods tab)
+local WMNightVision=VisualsPage:AddSection({Title="Night Vision",Side="Left"})
+WMNightVision:AddToggle({Text="Night Vision",Flag="wm_night_vision",Default=false,
+    Callback=function(v) NVG.Enabled=v;NVG_Apply() end})
+WMNightVision:AddDropdown({Text="NVG Color",Flag="wm_nvg_color",Options={"Green","Blue"},Default="Green",
+    Callback=function(v) NVG.Color=v;NVG_Apply() end})
+
+-- Auto Remove Tree — new section in World Mods page
+local WMTree=VisualsPage:AddSection({Title="Trees",Side="Left"})
+WMTree:AddToggle({Text="Auto Remove Trees",Flag="wm_auto_tree",Default=false,
+    Callback=function(v)
+        AutoTree.Enabled=v
+        if v then
+            AutoTree_Delete()
+            if not AutoTree._conn then
+                AutoTree._conn=AimRunService.Heartbeat:Connect(function()
+                    if AutoTree.Enabled then AutoTree_Delete() end
+                end)
+                table.insert(Combat.connections,AutoTree._conn)
+            end
+        else
+            if AutoTree._conn then
+                pcall(function() AutoTree._conn:Disconnect() end)
+                AutoTree._conn=nil
+            end
+        end
+    end})
+-- Delete Once button — dùng trực tiếp group của WMTree section
+-- (legacyPage:AddSection luôn table.insert group vào page.Groups → lấy group cuối)
+VisualsPage.Groups[#VisualsPage.Groups]:AddButton("Delete Trees Once",function()
+    AutoTree_Delete()
+end)
+
 local WMWorld = VisualsPage:AddSection({ Title = "World", Side = "Left" })
 WMWorld:AddToggle({Text="FPS Booster",Flag="wm_fps_booster",Default=false,Callback=Booster.SetEnabled})
 
@@ -4810,126 +4740,6 @@ wmTechDropdown = WMGraphics:AddDropdown({
 wm_setVisible(wmShadowSoftness, false)
 wm_setVisible(wmTechDropdown, false)
 
-
--- ── Night Vision (tipmobile NVGColorCorrection logic) ────────────────────
-do
-    local NVGColorCorrection = nil
-    local NVGColors = {["Green"]=Color3.fromRGB(112,245,65),["Blue"]=Color3.fromRGB(165,233,255)}
-    local CurrentNVGColor = "Green"
-    local NVGEnabled = false
-    local WMLightingNVG = game:GetService("Lighting")
-
-    local function ApplyNVGEffect()
-        if NVGEnabled and NVGColorCorrection then
-            NVGColorCorrection.TintColor = NVGColors[CurrentNVGColor] or NVGColors["Green"]
-            NVGColorCorrection.Brightness = 0.15
-            NVGColorCorrection.Contrast = 0.5
-            NVGColorCorrection.Saturation = -1
-            NVGColorCorrection.Enabled = true
-        end
-    end
-
-    local WMNight = VisualsPage:AddSection({Title="Night Vision",Side="Right"})
-    WMNight:AddToggle({
-        Text="Night Vision",
-        Flag="wm_nightvision",
-        Default=false,
-        Callback=function(v)
-            NVGEnabled = v
-            if v then
-                if not NVGColorCorrection then
-                    NVGColorCorrection = Instance.new("ColorCorrectionEffect")
-                    NVGColorCorrection.Name = "ERISKOI_NightVision"
-                    NVGColorCorrection.Parent = WMLightingNVG
-                end
-                ApplyNVGEffect()
-            else
-                if NVGColorCorrection then NVGColorCorrection.Enabled = false end
-            end
-        end
-    })
-    WMNight:AddDropdown({
-        Text="NVG Color",
-        Flag="wm_nvg_color",
-        Options={"Green","Blue"},
-        Default="Green",
-        Callback=function(v) CurrentNVGColor=v; ApplyNVGEffect() end
-    })
-    table.insert(Combat.connections, AimRunService.Heartbeat:Connect(function()
-        if NVGEnabled and NVGColorCorrection and not NVGColorCorrection.Enabled then
-            NVGColorCorrection.Enabled = true
-        end
-    end))
-    local destroyBeforeNVG = Combat.Destroy
-    Combat.Destroy = function()
-        if NVGColorCorrection then
-            pcall(function() NVGColorCorrection:Destroy() end)
-            NVGColorCorrection = nil
-        end
-        destroyBeforeNVG()
-    end
-end
-
--- ── Auto Remove Tree (tipmobile _DeleteTrees logic) ───────────────────────
-do
-    local TreePrefixes = {"arb","qradbiq","oradbbig","oragedbbig"}
-    local AutoTree = {Enabled=false, _connection=nil}
-
-    local function startsWith(str, prefix)
-        return string.sub(str:lower(),1,#prefix)==prefix
-    end
-
-    local function DeleteTrees()
-        local toDelete = {}
-        local parentMark = {}
-        for _,obj in pairs(workspace:GetDescendants()) do
-            if not obj or not obj.Parent then continue end
-            local name = obj.Name:lower()
-            local matched = false
-            for _,p in ipairs(TreePrefixes) do
-                if startsWith(name,p) then matched=true; break end
-            end
-            if matched then
-                if obj:IsA("Model") or obj:IsA("Folder") then
-                    table.insert(toDelete,obj); parentMark[obj]=true
-                else
-                    local parent=obj.Parent
-                    if parent and not parentMark[parent] then
-                        table.insert(toDelete,obj)
-                    end
-                end
-            end
-        end
-        for _,obj in pairs(toDelete) do
-            if obj and obj.Parent then pcall(function() obj:Destroy() end) end
-        end
-    end
-
-    local WMTree = VisualsPage:AddSection({Title="Remove Trees",Side="Left"})
-    WMTree:AddToggle({
-        Text="Auto Remove Trees",
-        Flag="wm_auto_tree",
-        Default=false,
-        Callback=function(v)
-            AutoTree.Enabled=v
-            if v then
-                if not AutoTree._connection then
-                    DeleteTrees()
-                    AutoTree._connection=AimRunService.Heartbeat:Connect(function()
-                        if AutoTree.Enabled then DeleteTrees() end
-                    end)
-                    table.insert(Combat.connections, AutoTree._connection)
-                end
-            else
-                if AutoTree._connection then
-                    pcall(function() AutoTree._connection:Disconnect() end)
-                    AutoTree._connection=nil
-                end
-            end
-        end
-    })
-    WMTree:AddButton("Delete Once",function() DeleteTrees() end)
-end
 
 Combat.World = WM
 local destroyBeforeWorld = Combat.Destroy
