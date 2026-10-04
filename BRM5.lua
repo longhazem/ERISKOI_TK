@@ -2241,7 +2241,6 @@ for _,entry in ipairs({{ZombiePage,"zombies"},{CorpsePage,"corpses"}}) do
     addESPDistance(general,kind)
     if kind=="zombies" then
         local zc=page:AddSection({Title="Zombie Type Colors",Side="Right"})
-        -- ColorPicker phải đi ngay sau toggle của nó (lastToggle assert)
         zc:AddToggle({Text="Crippled",Flag="zombie_crippled_on",Default=true,Callback=function()end})
         zc:AddColorPicker({Text="Crippled Color",Flag="zombie_color_crippled",Default=Sense.zombieAbilityColors[1],Callback=function(c) Sense.zombieAbilityColors[1]=c end})
         zc:AddToggle({Text="Slow",Flag="zombie_slow_on",Default=true,Callback=function()end})
@@ -3637,6 +3636,80 @@ do
     toggle(GunHandling,"Sight Zoom",Gun,"SightZoom","gun_sight_zoom")
     slider(GunHandling,"Sight Magnification",Gun,"Zoom","gun_sight_magnification",1,10,2,.1,"x")
     toggle(GunVisualSection,"Gun Debug HUD",Gun,"Debug","gun_debug_hud")
+    -- Aura Kill logic
+    local AKX={Enabled=false,Range=20,Interval=0,BatchSize=10,TargetPart="Head",_net=nil,_remote=nil,_lastFire=0,_conn=nil,_running=false}
+    local function AKX_FindNet()
+        if AKX._net then return AKX._net end
+        local gok,gc=pcall(function() return filtergc("table") end)
+        if not gok then gok,gc=pcall(function() return getgc(true) end) end
+        if gok and gc then
+            for _,v in pairs(gc) do
+                if type(v)~="table" then continue end
+                local k=rawget(v,"_key");local co=rawget(v,"_code");local ev=rawget(v,"_events")
+                if type(k)=="table" and #k>=5 and type(co)=="string" and co:match("^%x+%-%x+%-%x+%-%x+%-%x+$") and type(ev)=="table" then
+                    local ok2=true;for _,n in ipairs(k) do if type(n)~="number" then ok2=false;break end end
+                    if ok2 then AKX._net=v;return v end
+                end
+            end
+        end
+    end
+    local function AKX_GetRemote()
+        if AKX._remote and AKX._remote.Parent then return AKX._remote end
+        for _,v in ipairs(game:GetService("ReplicatedStorage"):GetDescendants()) do
+            if v:IsA("RemoteEvent") then AKX._remote=v;return v end
+        end
+    end
+    local function AKX_Encode(json,key)
+        local r=""
+        for i=1,#json do r=r..string.char((string.byte(json,i)-32+key[i%4+1])%95+32) end
+        local f=string.byte(json,1)
+        for i=1,key[5] do r=r..string.char(f-string.byte(tostring(i),1)) end
+        return r
+    end
+    local function AKX_Fire(actor)
+        local net=AKX_FindNet();if not net then return false end
+        local re=AKX_GetRemote();if not re then return false end
+        local char=actor.Character;if not char then return false end
+        local part=char:FindFirstChild(AKX.TargetPart) or char:FindFirstChild("Head") or char.PrimaryPart;if not part then return false end
+        local uid=rawget(actor,"UID") or rawget(actor,"_id");if type(uid)~="string" then return false end
+        local hs=game:GetService("HttpService");local pos=part.Position
+        pcall(function() re:FireServer(AKX_Encode(hs:JSONEncode({net._code,"InventoryAction","Slash",math.random(1,3)}),net._key)) end)
+        pcall(function() re:FireServer(AKX_Encode(hs:JSONEncode({net._code,"InventoryAction","Impact",{pos.X,pos.Y,pos.Z},uid,part.Name}),net._key)) end)
+        return true
+    end
+    local function AKX_Tick()
+        if not AKX.Enabled then return end
+        local now=tick();if now-AKX._lastFire<AKX.Interval then return end
+        local c=Combat.Service();if not c then return end
+        local me=c.Replicator and c.Replicator.LocalActor;if not me then return end
+        local myPos=me.Position or AimCamera.CFrame.Position;local cands={}
+        for _,actor in pairs(c.Replicator.Actors or {}) do
+            if Combat.Kind(actor) and Combat.IsAlive(actor) and actor.Character then
+                local ap=actor.Position or (actor.Character.PrimaryPart and actor.Character.PrimaryPart.Position)
+                if ap and (ap-myPos).Magnitude<=AKX.Range then cands[#cands+1]={a=actor,d=(ap-myPos).Magnitude} end
+            end
+        end
+        if #cands==0 then return end
+        table.sort(cands,function(a,b) return a.d<b.d end)
+        AKX._lastFire=now
+        for i=1,math.min(AKX.BatchSize,#cands) do task.spawn(function() if not AKX_Fire(cands[i].a) then AKX._net=nil end end) end
+    end
+    local function AKX_Start()
+        if AKX._running then return end;AKX._running=true
+        task.spawn(AKX_FindNet);task.spawn(AKX_GetRemote)
+        AKX._conn=AimRunService.Heartbeat:Connect(AKX_Tick);table.insert(Combat.connections,AKX._conn)
+    end
+    local function AKX_Stop()
+        AKX._running=false
+        if AKX._conn then pcall(function() AKX._conn:Disconnect() end);AKX._conn=nil end
+    end
+    -- Vehicle Teleporter logic
+    local VTP={_saved=nil}
+    local function VTP_GetVehicle()
+        local c=Combat.Service();local me=c and c.Replicator and c.Replicator.LocalActor;if not me then return nil end
+        local seat=rawget(me,"Seat") or me.Seat
+        return type(seat)=="table" and seat.Model
+    end
     local mp=MeleePage
     local ml=mp:AddSection({Title="Melee",Side="Left"})
     local mr=mp:AddSection({Title="Melee Aura",Side="Right"})
@@ -3652,7 +3725,7 @@ do
             for k,v in pairs(values or {}) do local name=type(k)=="number" and v or (v and k);if map[name] then selected[map[name]]=true end end
             A.Targets=selected
         end})
-    -- Aura Kill section — right side Melee page
+    -- Aura Kill UI — new right section in MeleePage (legacyPage, no lastToggle assert)
     local ak=mp:AddSection({Title="Aura Kill (Net)",Side="Right"})
     ak:AddToggle({Text="Enable Aura Kill",Flag="ak_enabled",Default=false,
         Callback=function(v) AKX.Enabled=v;if v then AKX_Start() else AKX_Stop() end end})
@@ -3665,32 +3738,29 @@ do
     ak:AddDropdown({Text="Target Part",Flag="ak_part",Options={"Head","UpperTorso","LowerTorso"},Default="Head",
         Callback=function(v) AKX.TargetPart=v end})
     local vp=VehiclePage
-    -- Vehicle Teleporter — left section, toggle-as-trigger pattern (no AddButton)
+    -- Vehicle Teleporter UI — new left section in VehiclePage (legacyPage)
     local vt=vp:AddSection({Title="Vehicle Teleporter",Side="Left"})
-    vt:AddToggle({Text="Save Position",Flag="vt_save",Default=false,
+    vt:AddToggle({Text="Save Position [Toggle]",Flag="vt_save",Default=false,
         Callback=function(v)
             if not v then return end
-            local model=VT_GetVehicle()
-            if model and model.PrimaryPart then
-                VehicleTeleporter._saved=model.PrimaryPart.CFrame
-                Library:Notify("Vehicle position saved")
+            local model=VTP_GetVehicle()
+            if model and model.PrimaryPart then VTP._saved=model.PrimaryPart.CFrame;Library:Notify("Vehicle position saved")
             else Library:Notify("Not in a vehicle") end
             Toggles.vt_save:SetValue(false)
         end})
-    vt:AddToggle({Text="Teleport to Saved",Flag="vt_teleport",Default=false,
+    vt:AddToggle({Text="Teleport to Saved [Toggle]",Flag="vt_teleport",Default=false,
         Callback=function(v)
             if not v then return end
-            if not VehicleTeleporter._saved then Library:Notify("No saved position");Toggles.vt_teleport:SetValue(false);return end
-            local model=VT_GetVehicle()
-            if model and model.PrimaryPart then pcall(function() model:PivotTo(VehicleTeleporter._saved) end)
+            if not VTP._saved then Library:Notify("No saved position");Toggles.vt_teleport:SetValue(false);return end
+            local model=VTP_GetVehicle()
+            if model and model.PrimaryPart then pcall(function() model:PivotTo(VTP._saved) end)
             else Library:Notify("Not in a vehicle") end
             Toggles.vt_teleport:SetValue(false)
         end})
-    vt:AddToggle({Text="Clear Saved",Flag="vt_clear",Default=false,
+    vt:AddToggle({Text="Clear Saved [Toggle]",Flag="vt_clear",Default=false,
         Callback=function(v)
             if not v then return end
-            VehicleTeleporter._saved=nil;Library:Notify("Cleared")
-            Toggles.vt_clear:SetValue(false)
+            VTP._saved=nil;Library:Notify("Cleared");Toggles.vt_clear:SetValue(false)
         end})
     local vl=vp:AddSection({Title="Driving",Side="Left"});local vr=vp:AddSection({Title="Flight",Side="Right"})
     toggle(vl,"Speed Mod",V,"Speed","vehicle_speed")
@@ -4069,105 +4139,6 @@ table.insert(Combat.connections,AimRunService.RenderStepped:Connect(function()
 end))
 
 
--- Night Vision
-local NVG={Enabled=false,Color="Green",_effect=nil,Colors={Green=Color3.fromRGB(112,245,65),Blue=Color3.fromRGB(165,233,255)}}
-local function NVG_Apply()
-    local L=game:GetService("Lighting")
-    if NVG.Enabled then
-        if not NVG._effect or not NVG._effect.Parent then
-            NVG._effect=Instance.new("ColorCorrectionEffect");NVG._effect.Name="ERISKOI_NVG";NVG._effect.Parent=L
-        end
-        NVG._effect.TintColor=NVG.Colors[NVG.Color] or NVG.Colors.Green
-        NVG._effect.Brightness=0.15;NVG._effect.Contrast=0.5;NVG._effect.Saturation=-1;NVG._effect.Enabled=true
-    else
-        if NVG._effect and NVG._effect.Parent then NVG._effect.Enabled=false end
-    end
-end
--- Auto Remove Tree
-local AutoTree={Enabled=false,_conn=nil,_prefixes={"arb","qradbiq","oradbbig","oragedbbig"}}
-local function AutoTree_Match(n) local l=n:lower();for _,p in ipairs(AutoTree._prefixes) do if l:sub(1,#p)==p then return true end end end
-local function AutoTree_Delete()
-    for _,o in pairs(workspace:GetDescendants()) do
-        if o and o.Parent and AutoTree_Match(o.Name) then
-            if o:IsA("Model") or o:IsA("BasePart") or o:IsA("Folder") then pcall(function() o:Destroy() end) end
-        end
-    end
-end
--- Vehicle Teleporter
-local VehicleTeleporter={_saved=nil}
-local function VT_GetVehicle()
-    local c=Combat.Service();local me=c and c.Replicator and c.Replicator.LocalActor;if not me then return nil end
-    local seat=rawget(me,"Seat") or me.Seat
-    return seat and type(seat)=="table" and seat.Model
-end
--- Aura Kill
-local AKX={Enabled=false,Range=20,Interval=0,BatchSize=10,TargetPart="Head",_net=nil,_remote=nil,_lastFire=0,_conn=nil,_running=false}
-local function AKX_FindNet()
-    if AKX._net then return AKX._net end
-    local gok,gc=pcall(function() return filtergc("table") end)
-    if not gok then gok,gc=pcall(function() return getgc(true) end) end
-    if gok and gc then
-        for _,v in pairs(gc) do
-            if type(v)~="table" then continue end
-            local k=rawget(v,"_key");local co=rawget(v,"_code");local ev=rawget(v,"_events")
-            if type(k)=="table" and #k>=5 and type(co)=="string" and co:match("^%x+%-%x+%-%x+%-%x+%-%x+$") and type(ev)=="table" then
-                local ok=true;for _,n in ipairs(k) do if type(n)~="number" then ok=false;break end end
-                if ok then AKX._net=v;return v end
-            end
-        end
-    end
-end
-local function AKX_GetRemote()
-    if AKX._remote and AKX._remote.Parent then return AKX._remote end
-    for _,v in ipairs(game:GetService("ReplicatedStorage"):GetDescendants()) do
-        if v:IsA("RemoteEvent") then AKX._remote=v;return v end
-    end
-end
-local function AKX_Encode(json,key)
-    local r=""
-    for i=1,#json do r=r..string.char((string.byte(json,i)-32+key[i%4+1])%95+32) end
-    local f=string.byte(json,1)
-    for i=1,key[5] do r=r..string.char(f-string.byte(tostring(i),1)) end
-    return r
-end
-local function AKX_Fire(actor)
-    local net=AKX_FindNet();if not net then return false end
-    local re=AKX_GetRemote();if not re then return false end
-    local char=actor.Character;if not char then return false end
-    local part=char:FindFirstChild(AKX.TargetPart) or char:FindFirstChild("Head") or char.PrimaryPart;if not part then return false end
-    local uid=rawget(actor,"UID") or rawget(actor,"_id");if type(uid)~="string" then return false end
-    local hs=game:GetService("HttpService");local pos=part.Position
-    pcall(function() re:FireServer(AKX_Encode(hs:JSONEncode({net._code,"InventoryAction","Slash",math.random(1,3)}),net._key)) end)
-    pcall(function() re:FireServer(AKX_Encode(hs:JSONEncode({net._code,"InventoryAction","Impact",{pos.X,pos.Y,pos.Z},uid,part.Name}),net._key)) end)
-    return true
-end
-local function AKX_Tick()
-    if not AKX.Enabled then return end
-    local now=tick();if now-AKX._lastFire<AKX.Interval then return end
-    local c=Combat.Service();if not c then return end
-    local me=c.Replicator and c.Replicator.LocalActor;if not me then return end
-    local myPos=me.Position or AimCamera.CFrame.Position;local cands={}
-    for _,actor in pairs(c.Replicator.Actors or {}) do
-        if Combat.Kind(actor) and Combat.IsAlive(actor) and actor.Character then
-            local ap=actor.Position or (actor.Character.PrimaryPart and actor.Character.PrimaryPart.Position)
-            if ap and (ap-myPos).Magnitude<=AKX.Range then cands[#cands+1]={a=actor,d=(ap-myPos).Magnitude} end
-        end
-    end
-    if #cands==0 then return end
-    table.sort(cands,function(a,b) return a.d<b.d end)
-    AKX._lastFire=now
-    for i=1,math.min(AKX.BatchSize,#cands) do task.spawn(function() if not AKX_Fire(cands[i].a) then AKX._net=nil end end) end
-end
-local function AKX_Start()
-    if AKX._running then return end;AKX._running=true
-    task.spawn(AKX_FindNet);task.spawn(AKX_GetRemote)
-    AKX._conn=AimRunService.Heartbeat:Connect(AKX_Tick);table.insert(Combat.connections,AKX._conn)
-end
-local function AKX_Stop()
-    AKX._running=false
-    if AKX._conn then pcall(function() AKX._conn:Disconnect() end);AKX._conn=nil end
-end
-
 do
 local WMLighting = game:GetService("Lighting")
 local VisualsPage = legacyPage(Tabs.Mods, modPages, 'World Mods')
@@ -4417,15 +4388,37 @@ end
 table.insert(Combat.connections, AimRunService.RenderStepped:Connect(WM.Apply))
 
 -- ── World ─────────────────────────────────────────────────────
--- Night Vision section
-local WMNight=VisualsPage:AddSection({Title="Night Vision",Side="Left"})
+-- Night Vision logic
+local NVG={Enabled=false,Color="Green",_effect=nil,Colors={Green=Color3.fromRGB(112,245,65),Blue=Color3.fromRGB(165,233,255)}}
+local function NVG_Apply()
+    if NVG.Enabled then
+        if not NVG._effect or not NVG._effect.Parent then
+            NVG._effect=Instance.new("ColorCorrectionEffect");NVG._effect.Name="ERISKOI_NVG";NVG._effect.Parent=WMLighting
+        end
+        NVG._effect.TintColor=NVG.Colors[NVG.Color] or NVG.Colors.Green
+        NVG._effect.Brightness=0.15;NVG._effect.Contrast=0.5;NVG._effect.Saturation=-1;NVG._effect.Enabled=true
+    else
+        if NVG._effect and NVG._effect.Parent then NVG._effect.Enabled=false end
+    end
+end
+-- Auto Remove Tree logic
+local AutoTree={Enabled=false,_conn=nil,_prefixes={"arb","qradbiq","oradbbig","oragedbbig"}}
+local function AutoTree_Match(n) local l=n:lower();for _,p in ipairs(AutoTree._prefixes) do if l:sub(1,#p)==p then return true end end end
+local function AutoTree_Delete()
+    for _,o in pairs(workspace:GetDescendants()) do
+        if o and o.Parent and AutoTree_Match(o.Name) then
+            if o:IsA("Model") or o:IsA("BasePart") or o:IsA("Folder") then pcall(function() o:Destroy() end) end
+        end
+    end
+end
+-- Night Vision section — legacyPage, no lastToggle assert
+local WMNight=VisualsPage:AddSection({Title="Night Vision",Side="Right"})
 WMNight:AddToggle({Text="Night Vision",Flag="wm_night_vision",Default=false,
     Callback=function(v) NVG.Enabled=v;NVG_Apply() end})
-WMNight:AddToggle({Text="NVG Color: Green",Flag="wm_nvg_green",Default=true,
-    Callback=function(v) NVG.Color=v and "Green" or "Blue";NVG_Apply() end})
-
--- Auto Remove Tree section
-local WMTree=VisualsPage:AddSection({Title="Trees",Side="Left"})
+WMNight:AddToggle({Text="NVG: Blue Mode",Flag="wm_nvg_blue",Default=false,
+    Callback=function(v) NVG.Color=v and "Blue" or "Green";NVG_Apply() end})
+-- Auto Tree section — legacyPage, no lastToggle assert
+local WMTree=VisualsPage:AddSection({Title="Trees",Side="Right"})
 WMTree:AddToggle({Text="Auto Remove Trees",Flag="wm_auto_tree",Default=false,
     Callback=function(v)
         AutoTree.Enabled=v
@@ -4441,13 +4434,11 @@ WMTree:AddToggle({Text="Auto Remove Trees",Flag="wm_auto_tree",Default=false,
             if AutoTree._conn then pcall(function() AutoTree._conn:Disconnect() end);AutoTree._conn=nil end
         end
     end})
-WMTree:AddToggle({Text="Delete Trees Once",Flag="wm_tree_once",Default=false,
+WMTree:AddToggle({Text="Delete Trees Once [Toggle]",Flag="wm_tree_once",Default=false,
     Callback=function(v)
         if not v then return end
-        AutoTree_Delete()
-        Toggles.wm_tree_once:SetValue(false)
+        AutoTree_Delete();Toggles.wm_tree_once:SetValue(false)
     end})
-
 local WMWorld = VisualsPage:AddSection({ Title = "World", Side = "Left" })
 WMWorld:AddToggle({Text="FPS Booster",Flag="wm_fps_booster",Default=false,Callback=Booster.SetEnabled})
 
