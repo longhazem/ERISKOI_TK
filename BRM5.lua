@@ -1040,17 +1040,17 @@ local Sense = (function()
     end
     function E.UpdateHighlights()
         local alive={}
-        local c=E.Service()
-        for _,actor in pairs(c and c.Replicator and c.Replicator.Actors or {}) do
+        -- iterate E.objects — already synced and filtered by E.Sync()
+        for actor,o in pairs(E.objects) do
             local kind=E.Kind(actor)
-            if kind and E.highlightSettings[kind] and actor.Character and actor.Character.Parent then
+            if kind and E.highlightSettings[kind] and o.model and o.model.Parent then
                 alive[actor]=true
                 local hl=E.highlights[actor]
                 if not hl or not hl.Parent then
                     hl=Instance.new("Highlight")
                     hl.FillTransparency=0.88;hl.OutlineTransparency=0
                     pcall(function() hl.DepthMode=Enum.HighlightDepthMode.AlwaysOnTop end)
-                    hl.Parent=actor.Character;E.highlights[actor]=hl
+                    hl.Parent=o.model;E.highlights[actor]=hl
                 end
                 local col=hl_color(actor,kind);hl.FillColor=col;hl.OutlineColor=col
             end
