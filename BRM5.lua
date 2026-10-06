@@ -1,3 +1,4 @@
+
 local repo = 'https://raw.githubusercontent.com/longhazem/ERISKOI_TK/main/'
 
 local LibrarySourceUrl = 'https://raw.githubusercontent.com/longhazem/ERISKOI_TK/main/LinoriaSrc.lua'
@@ -1038,9 +1039,6 @@ local Sense = (function()
         E.advanced[kind]=table.clone(E.advanced.npc)
     end
     local service, resolveAt, connection, anchor
-    E.highlightSettings={npc=false,players=false,zombies=false,corpses=false}
-    E.zombieAbilityColors={[1]=Color3.fromRGB(149,75,0),[2]=Color3.fromRGB(255,255,0),[3]=Color3.fromRGB(255,0,0),[4]=Color3.fromRGB(148,0,255)}
-    local hlObjects={} -- [uid] = Highlight instance
     local signs = {Vector3.new(-1,-1,-1),Vector3.new(-1,1,-1),Vector3.new(-1,1,1),Vector3.new(-1,-1,1),
         Vector3.new(1,-1,-1),Vector3.new(1,1,-1),Vector3.new(1,1,1),Vector3.new(1,-1,1)}
     local edges = {{1,2},{2,3},{3,4},{4,1},{5,6},{6,7},{7,8},{8,5},{1,5},{2,6},{3,7},{4,8}}
@@ -1860,15 +1858,6 @@ end
 local NpcGeneral = NpcPage:AddSection({Title="General",Side="Left"})
 NpcGeneral:AddToggle({Text="ESP Enabled",Flag="npc_enabled",Default=true,
     Callback=function(v) Sense.teamSettings.npc.enabled=v end})
-NpcGeneral:AddToggle({Text="Highlight ESP",Flag="npc_highlight",Default=false,
-    Callback=function(v)
-        Sense.highlightSettings.npc=v
-        for uid,hl in pairs(hlObjects) do
-            local c=Sense.Service();local actors=c and c.Replicator and c.Replicator.Actors
-            local actor=actors and actors[uid]
-            if actor then local kind=Sense.Kind(actor);if kind then hl.Enabled=Sense.highlightSettings[kind] end end
-        end
-    end})
 addESPDistance(NpcGeneral,"npc")
 local function buildTeamPage(page, team)
     local t     = Sense.teamSettings[team]
@@ -2198,15 +2187,6 @@ buildTeamPage(NpcPage,"npc")
 local PlayerGeneral=PlayersPage:AddSection({Title="General",Side="Left"})
 PlayerGeneral:AddToggle({Text="ESP Enabled",Flag="players_enabled",Default=false,
     Callback=function(v) Sense.teamSettings.players.enabled=v end})
-PlayerGeneral:AddToggle({Text="Highlight ESP",Flag="players_highlight",Default=false,
-    Callback=function(v)
-        Sense.highlightSettings.players=v
-        for uid,hl in pairs(hlObjects) do
-            local c=Sense.Service();local actors=c and c.Replicator and c.Replicator.Actors
-            local actor=actors and actors[uid]
-            if actor then local kind=Sense.Kind(actor);if kind then hl.Enabled=Sense.highlightSettings[kind] end end
-        end
-    end})
 addESPDistance(PlayerGeneral,"players")
 PlayerGeneral:AddToggle({Text="Team Check",Flag="players_team_check",Default=false,
     Callback=function(v) Sense.teamSettings.players.teamCheck=v end})
@@ -2216,15 +2196,6 @@ for _,entry in ipairs({{ZombiePage,"zombies"},{CorpsePage,"corpses"}}) do
     local general=page:AddSection({Title="General",Side="Left"})
     general:AddToggle({Text="ESP Enabled",Flag=kind.."_enabled",Default=false,
         Callback=function(v) Sense.teamSettings[kind].enabled=v end})
-    general:AddToggle({Text="Highlight ESP",Flag=kind.."_highlight",Default=false,
-        Callback=function(v)
-            Sense.highlightSettings[kind]=v
-            for uid,hl in pairs(hlObjects) do
-                local c=Sense.Service();local actors=c and c.Replicator and c.Replicator.Actors
-                local actor=actors and actors[uid]
-                if actor then local k=Sense.Kind(actor);if k then hl.Enabled=Sense.highlightSettings[k] end end
-            end
-        end})
     addESPDistance(general,kind)
     buildTeamPage(page,kind)
 end
@@ -4517,58 +4488,6 @@ addSubtabs('Mods', modPages)
 end
 
 table.insert(Combat.connections, AimRunService.RenderStepped:Connect(Combat.Frame))
-
--- Highlight ESP — mượn logic từ tipmobile CreateHighlight
--- Tạo Highlight một lần, dùng .Enabled để toggle, không tạo lại mỗi frame
-table.insert(Combat.connections, AimRunService.Heartbeat:Connect(function()
-    local hs=Sense.highlightSettings
-    local c=Sense.Service()
-    local actors=c and c.Replicator and c.Replicator.Actors
-    if not actors then return end
-    -- Tạo highlight cho actors mới
-    for uid,actor in pairs(actors) do
-        local kind=Sense.Kind(actor)
-        if not kind then continue end
-        local char=actor.Character
-        if not char or not char.Parent then continue end
-        local hl=hlObjects[uid]
-        if not hl or not hl.Parent then
-            -- tạo mới — giống tipmobile CreateHighlight
-            local col
-            if kind=="zombies" or kind=="corpses" then
-                local ab=type(actor.Health)=="table" and actor.Health.Ability
-                col=(ab and Sense.zombieAbilityColors[ab]) or Color3.fromRGB(255,0,0)
-            elseif kind=="players" then col=Color3.fromRGB(255,165,0)
-            else col=Color3.fromRGB(100,220,150) end
-            hl=Instance.new("Highlight")
-            hl.FillColor=col;hl.FillTransparency=0.9
-            hl.OutlineColor=col;hl.OutlineTransparency=0
-            pcall(function() hl.DepthMode=Enum.HighlightDepthMode.AlwaysOnTop end)
-            hl.Enabled=hs[kind]
-            hl.Parent=char
-            hlObjects[uid]=hl
-        else
-            -- update .Enabled và màu
-            hl.Enabled=hs[kind]
-            if hs[kind] then
-                local col
-                if kind=="zombies" or kind=="corpses" then
-                    local ab=type(actor.Health)=="table" and actor.Health.Ability
-                    col=(ab and Sense.zombieAbilityColors[ab]) or Color3.fromRGB(255,0,0)
-                elseif kind=="players" then col=Color3.fromRGB(255,165,0)
-                else col=Color3.fromRGB(100,220,150) end
-                hl.FillColor=col;hl.OutlineColor=col
-            end
-        end
-    end
-    -- Xóa highlight của actors không còn tồn tại
-    for uid,hl in pairs(hlObjects) do
-        if not actors[uid] then
-            pcall(function() if hl.Parent then hl:Destroy() end end)
-            hlObjects[uid]=nil
-        end
-    end
-end))
 
 -- Keep overlay visibility independent from text and performance updates.
 local OverlaySettings={Watermark=true,Keybinds=true}
