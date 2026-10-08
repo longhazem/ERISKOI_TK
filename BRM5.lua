@@ -3609,6 +3609,176 @@ do
     V.key=vr:AddKeyPicker({Text="Vehicle Fly Key",Flag="vehicle_fly_key",Default="None",Mode="Toggle",Callback=function() end})
     slider(vr,"Fly Speed",V,"FlySpeed","vehicle_fly_speed",1,2000,60,1," studs/s")
     toggle(vr,"Vehicle Noclip",V,"Noclip","vehicle_noclip")
+
+    -- ── Vehicle Teleporter ─────────────────────────────────────────────────────
+    local VTEL_PATH = "Tokaihub/BRM5/veh_coords.json"
+    local vtel_coords = {}
+
+    local function vtel_load()
+        pcall(function()
+            if isfile and isfile(VTEL_PATH) then
+                local ok2, decoded = pcall(function()
+                    return game:GetService("HttpService"):JSONDecode(readfile(VTEL_PATH))
+                end)
+                if ok2 and type(decoded) == "table" then vtel_coords = decoded end
+            end
+        end)
+    end
+
+    local function vtel_save()
+        pcall(function()
+            if not isfolder("Tokaihub") then makefolder("Tokaihub") end
+            if not isfolder("Tokaihub/BRM5") then makefolder("Tokaihub/BRM5") end
+            writefile(VTEL_PATH, game:GetService("HttpService"):JSONEncode(vtel_coords))
+        end)
+    end
+
+    local function vtel_names()
+        local names = {}
+        for k in pairs(vtel_coords) do names[#names+1] = k end
+        table.sort(names)
+        return names
+    end
+
+    local function GetActiveVehicleController()
+        local s = V.activeSolver
+        if s and s._vehicle and s._vehicle.Controlling then return s end
+        return nil
+    end
+
+    local function GetNetwork()
+        if V._vtel_net then return V._vtel_net end
+        local inspect = (debug and debug.getupvalues) or getupvalues
+        if not inspect then return nil end
+        local service = Combat.Service()
+        local replicator = service and service.Replicator
+        if replicator and type(replicator.Update) == "function" then
+            local ok, values = pcall(inspect, replicator.Update)
+            if ok then
+                for _, value in pairs(values) do
+                    if type(value) == "table" then
+                        local ok2, fs = pcall(function() return value.FireServer end)
+                        if ok2 and type(fs) == "function" then V._vtel_net = value; return value end
+                    end
+                end
+            end
+        end
+        local vs = X.classes.VehicleSolver
+        if vs then
+            for _, mname in ipairs({"Update", "_integrate"}) do
+                local fn = type(rawget(vs, mname)) == "function" and rawget(vs, mname)
+                if fn then
+                    local ok, vals = pcall(inspect, fn)
+                    if ok then
+                        for _, v in pairs(vals) do
+                            if type(v) == "table" then
+                                local ok2, fs = pcall(function() return v.FireServer end)
+                                if ok2 and type(fs) == "function" then V._vtel_net = v; return v end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+        return nil
+    end
+
+    local function TeleportVehicle(targetPos, targetRotY)
+        local net = GetNetwork()
+        if not net then Library:Notify("Network Service not found!", 3); return end
+        local controller = GetActiveVehicleController()
+        if not controller or not controller._vehicle then Library:Notify("Get in a vehicle first!", 3); return end
+        local vehicle = controller._vehicle
+        local newCF
+        if typeof and typeof(targetPos) == "CFrame" then
+            newCF = targetPos
+        elseif type(targetPos) == "userdata" and targetPos.IsA and targetPos:IsA("CFrame") then
+            newCF = targetPos
+        elseif type(targetPos) == "table" and targetPos.Position then
+            newCF = targetPos
+        else
+            newCF = CFrame.new(targetPos)
+            if targetRotY then newCF = newCF * CFrame.Angles(0, math.rad(targetRotY), 0) end
+        end
+        if vehicle.Hitbox then vehicle.Hitbox.CFrame = newCF end
+        vehicle.CFrame = newCF
+        local solver = controller._solver
+        if solver and solver.SetState then
+            solver:SetState(newCF, Vector3.new(0,0,0), Vector3.new(0,0,0), vehicle.ComponentReplicates)
+        end
+        local x,y,z,r00,r01,r02,r10,r11,r12,r20,r21,r22 = newCF:GetComponents()
+        net:FireServer(
+            "ReplicateVehicle", vehicle.UID,
+            x,y,z, r00,r01,r02, r10,r11,r12, r20,r21,r22,
+            vehicle.Steering or 0, vehicle.ComponentReplicates
+        )
+        Library:Notify("Vehicle Teleported!", 3)
+    end
+
+    vtel_load()
+
+    local vtpSection = vp:AddSection({Title="Teleporter", Side="Left"})
+
+    vtpSection:AddDropdown("tp_saved_coords", {
+        Text  = "Saved Coordinates",
+        Values = vtel_names(),
+        AllowNull = true,
+        Callback = function() end
+    })
+
+    vtpSection:AddButton("Get Coordinates", function()
+        local controller = GetActiveVehicleController()
+        if not controller or not controller._vehicle then
+            Library:Notify("Get in a vehicle first!", 3)
+            return
+        end
+        local cf = controller._vehicle.CFrame
+        local idx = 1
+        while vtel_coords["Coord "..idx] do idx = idx + 1 end
+        local name = "Coord "..idx
+        local x,y,z,r00,r01,r02,r10,r11,r12,r20,r21,r22 = cf:GetComponents()
+        vtel_coords[name] = {x,y,z,r00,r01,r02,r10,r11,r12,r20,r21,r22}
+        vtel_save()
+        local names = vtel_names()
+        Options["tp_saved_coords"]:SetValues(names)
+        Options["tp_saved_coords"]:SetValue(name)
+        Library:Notify("Saved: "..name, 3)
+    end)
+
+    vtpSection:AddButton("Teleport", function()
+        local sel = Options["tp_saved_coords"].Value
+        if not sel or sel == "" then
+            Library:Notify("Select a coordinate first!", 3)
+            return
+        end
+        local entry = vtel_coords[sel]
+        if not entry or type(entry) ~= "table" or #entry < 12 then
+            Library:Notify("Invalid coordinate data!", 3)
+            return
+        end
+        TeleportVehicle(CFrame.new(
+            entry[1],entry[2],entry[3],
+            entry[4],entry[5],entry[6],
+            entry[7],entry[8],entry[9],
+            entry[10],entry[11],entry[12]
+        ))
+    end)
+
+    vtpSection:AddButton("Delete Coordinate", function()
+        local sel = Options["tp_saved_coords"].Value
+        if not sel or sel == "" then
+            Library:Notify("Select a coordinate to delete!", 3)
+            return
+        end
+        vtel_coords[sel] = nil
+        vtel_save()
+        local names = vtel_names()
+        Options["tp_saved_coords"]:SetValues(names)
+        Options["tp_saved_coords"]:SetValue(names[1])
+        Library:Notify("Deleted: "..sel, 3)
+    end)
+    -- ───────────────────────────────────────────────────────────────────────────
+
     local tp=TurretPage
     local ts=tp:AddSection({Title="Turret",Side="Left"})
     toggle(ts,"Turret RPM Changer",T,"RPM","turret_rpm_enabled")
@@ -3824,6 +3994,7 @@ do
         Gun.Hook(c,"Update",function(original) return function(solver,dt,inputs,...)
             local vehicle=solver._vehicle
             if not X.active or not vehicle or not vehicle.Controlling then return original(solver,dt,inputs,...) end
+            V.activeSolver = solver
             local physics=solver._solver;local state=physics and physics.State
             if not state then return original(solver,dt,inputs,...) end
             local heli=vehicle.Rotors~=nil
