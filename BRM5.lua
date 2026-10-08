@@ -3718,15 +3718,15 @@ do
     vtel_load()
 
     local vtpSection = vp:AddSection({Title="Teleporter", Side="Left"})
+    local vtpGroup = vp.Groups[#vp.Groups]  -- raw LinoriaLib groupbox (section wrapper has no AddButton)
 
-    vtpSection:AddDropdown("tp_saved_coords", {
-        Text  = "Saved Coordinates",
-        Values = vtel_names(),
+    vtpGroup:AddDropdown("tp_saved_coords", {
+        Text     = "Saved Coordinates",
+        Values   = vtel_names(),
         AllowNull = true,
-        Callback = function() end
     })
 
-    vtpSection:AddButton("Get Coordinates", function()
+    vtpGroup:AddButton("Get Coordinates", function()
         local controller = GetActiveVehicleController()
         if not controller or not controller._vehicle then
             Library:Notify("Get in a vehicle first!", 3)
@@ -3745,7 +3745,7 @@ do
         Library:Notify("Saved: "..name, 3)
     end)
 
-    vtpSection:AddButton("Teleport", function()
+    vtpGroup:AddButton("Teleport", function()
         local sel = Options["tp_saved_coords"].Value
         if not sel or sel == "" then
             Library:Notify("Select a coordinate first!", 3)
@@ -3764,7 +3764,7 @@ do
         ))
     end)
 
-    vtpSection:AddButton("Delete Coordinate", function()
+    vtpGroup:AddButton("Delete Coordinate", function()
         local sel = Options["tp_saved_coords"].Value
         if not sel or sel == "" then
             Library:Notify("Select a coordinate to delete!", 3)
