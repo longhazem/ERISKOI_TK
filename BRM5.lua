@@ -1675,6 +1675,61 @@ Combat.Destroy = function()
     Sense.Unload()
     destroyBeforeVisuals()
 end
+-- ── HIGHLIGHT ESP INFRASTRUCTURE ─────────────────────────────────
+do
+    local hlInstances = {}
+    local hlSettings = {
+        npc     = {enabled=false,fillColor=Color3.fromRGB(255,170,0),  outlineColor=Color3.fromRGB(255,255,255),fillTransp=0.5,outlineTransp=0},
+        players = {enabled=false,fillColor=Color3.fromRGB(255,50,50),  outlineColor=Color3.fromRGB(255,255,255),fillTransp=0.5,outlineTransp=0},
+        zombies = {enabled=false,fillColor=Color3.fromRGB(50,200,50),  outlineColor=Color3.fromRGB(255,255,255),fillTransp=0.5,outlineTransp=0},
+        corpses = {enabled=false,fillColor=Color3.fromRGB(150,150,150),outlineColor=Color3.fromRGB(200,200,200),fillTransp=0.5,outlineTransp=0},
+    }
+    local runnerFill = Color3.fromRGB(148,0,211)
+    Sense.highlightSettings = hlSettings
+    local function destroyHL(actor)
+        if hlInstances[actor] then
+            pcall(function() hlInstances[actor]:Destroy() end)
+            hlInstances[actor]=nil
+        end
+    end
+    local function syncHL()
+        for actor,obj in pairs(Sense.objects) do
+            local kind=Sense.Kind(actor)
+            local cfg=kind and hlSettings[kind]
+            if cfg and cfg.enabled and obj.model and obj.model.Parent then
+                local hl=hlInstances[actor]
+                if not hl or not hl.Parent then
+                    hl=Instance.new("Highlight")
+                    hl.DepthMode=Enum.HighlightDepthMode.AlwaysOnTop
+                    hl.Parent=obj.model
+                    hlInstances[actor]=hl
+                end
+                if kind=="zombies" then
+                    local hrp=obj.model:FindFirstChild("HumanoidRootPart")
+                    local isRunner=obj.model.Name:lower():find("run")~=nil
+                        or (hrp and hrp.AssemblyLinearVelocity.Magnitude>18)
+                    hl.FillColor=isRunner and runnerFill or cfg.fillColor
+                else
+                    hl.FillColor=cfg.fillColor
+                end
+                hl.OutlineColor=cfg.outlineColor
+                hl.FillTransparency=cfg.fillTransp
+                hl.OutlineTransparency=cfg.outlineTransp
+            else
+                destroyHL(actor)
+            end
+        end
+        for actor in pairs(hlInstances) do
+            if not Sense.objects[actor] then destroyHL(actor) end
+        end
+    end
+    table.insert(Combat.connections,AimRunService.Heartbeat:Connect(syncHL))
+    local prevDestroyHL=Combat.Destroy
+    Combat.Destroy=function()
+        for actor in pairs(hlInstances) do destroyHL(actor) end
+        prevDestroyHL()
+    end
+end
 -- Adapt the Tokaihub visual controls to Linoria without changing the renderer.
 local visualPages = {}
 local function visualPage(name)
@@ -2181,6 +2236,27 @@ local function buildTeamPage(page, team)
             if alpha ~= nil then chams.occludedIntensity = alpha end
         end
     })
+
+    -- ── Highlight ─────────────────────────────────────────────────
+    local hlCfg = Sense.highlightSettings and Sense.highlightSettings[team]
+    if hlCfg then
+        local HLSec = page:AddSection({Title = "Highlight", Side = "Right"})
+        local hlText = team=="zombies" and "Highlight (Runner=Purple)" or "Highlight"
+        HLSec:AddToggle({Text=hlText,Flag=prefix.."hl_enabled",Default=false,
+            Callback=function(v) hlCfg.enabled=v end})
+        HLSec:AddColorPicker({Text="Fill Color",Flag=prefix.."hl_fill",
+            Default=hlCfg.fillColor,Transparency=hlCfg.fillTransp,
+            Callback=function(color,alpha)
+                hlCfg.fillColor=color
+                if alpha~=nil then hlCfg.fillTransp=alpha end
+            end})
+        HLSec:AddColorPicker({Text="Outline Color",Flag=prefix.."hl_outline",
+            Default=hlCfg.outlineColor,Transparency=hlCfg.outlineTransp,
+            Callback=function(color,alpha)
+                hlCfg.outlineColor=color
+                if alpha~=nil then hlCfg.outlineTransp=alpha end
+            end})
+    end
 end
 
 buildTeamPage(NpcPage,"npc")
@@ -2241,6 +2317,37 @@ SharedLeft:AddDropdown({
 
 SharedLeft:AddSlider({Text="Box Outline Thickness",Flag="npc_box_outline_thickness",Min=1,Max=5,Default=1,Suffix="px",
     Callback=function(v) Sense.teamSettings.npc.boxOutlineThickness=v;Sense.teamSettings.players.boxOutlineThickness=v end})
+
+-- ── NIGHT VISION / THERMAL ────────────────────────────────────────
+do
+    local nvEffect,nvActive,nvMode=nil,false,"NightVision"
+    local nvModes={
+        NightVision={Brightness=0.5,Contrast=0.1,Saturation=-0.8,TintColor=Color3.fromRGB(130,255,130)},
+        Thermal    ={Brightness=0.3,Contrast=0.5,Saturation=-1,  TintColor=Color3.fromRGB(255,120,40)},
+    }
+    local function applyNV()
+        if not nvActive then
+            if nvEffect then nvEffect:Destroy();nvEffect=nil end;return
+        end
+        local Lighting=game:GetService("Lighting")
+        if not nvEffect or not nvEffect.Parent then
+            nvEffect=Instance.new("ColorCorrectionEffect")
+            nvEffect.Name="ERISKOI_NV";nvEffect.Parent=Lighting
+        end
+        local cfg=nvModes[nvMode] or nvModes.NightVision
+        nvEffect.Brightness=cfg.Brightness;nvEffect.Contrast=cfg.Contrast
+        nvEffect.Saturation=cfg.Saturation;nvEffect.TintColor=cfg.TintColor
+    end
+    SharedLeft:AddToggle({Text="Night Vision / Thermal",Flag="nv_enabled",Default=false,
+        Callback=function(v) nvActive=v;applyNV() end})
+    SharedLeft:AddDropdown({Text="NV Mode",Flag="nv_mode",Options={"Night Vision","Thermal"},Default="Night Vision",
+        Callback=function(v) nvMode=v=="Thermal" and "Thermal" or "NightVision";applyNV() end})
+    local prevDestroyNV=Combat.Destroy
+    Combat.Destroy=function()
+        if nvEffect then nvEffect:Destroy();nvEffect=nil end
+        prevDestroyNV()
+    end
+end
 
 addSubtabs('Visuals', visualPages)
 -- Visuals 3D Preview: Players, NPCs and Zombies.
@@ -4652,6 +4759,57 @@ Combat.Destroy = function()
     destroyBeforeWorld()
 end
 
+end
+
+-- ── SPINBOT ───────────────────────────────────────────────────────
+do
+    local SpinbotPage=legacyPage(Tabs.Movement,movementPages,"Spinbot")
+    local SpinSec=SpinbotPage:AddSection({Title="Spinbot",Side="Left"})
+    local spinEnabled,spinSpeed,spinConn=false,5,nil
+    SpinSec:AddToggle({Text="Enable Spinbot",Flag="spinbot_enabled",Default=false,
+        Callback=function(v)
+            spinEnabled=v
+            if spinConn then spinConn:Disconnect();spinConn=nil end
+            if spinEnabled then
+                spinConn=AimRunService.Heartbeat:Connect(function(dt)
+                    local char=AimLocalPlayer.Character
+                    local hrp=char and char:FindFirstChild("HumanoidRootPart")
+                    if hrp then
+                        hrp.CFrame=hrp.CFrame*CFrame.Angles(0,math.rad(spinSpeed*dt*60),0)
+                    end
+                end)
+                table.insert(Combat.connections,spinConn)
+            end
+        end})
+    SpinSec:AddSlider({Text="Spin Speed",Flag="spinbot_speed",Min=1,Max=20,Default=5,Suffix="",
+        Callback=function(v) spinSpeed=v end})
+    SpinSec:AddKeyPicker({Text="Spinbot",Flag="spinbot_key",Default="None",
+        Callback=function() end})
+end
+
+-- ── THIRD PERSON UNLOCK ───────────────────────────────────────────
+do
+    local CharPage=legacyPage(Tabs.Movement,movementPages,"Character")
+    local CharSec=CharPage:AddSection({Title="Third Person",Side="Left"})
+    local tpEnabled=false
+    CharSec:AddToggle({Text="Third Person Unlock",Flag="thirdperson_enabled",Default=false,
+        Callback=function(v)
+            tpEnabled=v
+            if v then
+                task.spawn(function()
+                    while tpEnabled do
+                        pcall(function()
+                            for _,t in ipairs(getgc(true)) do
+                                if type(t)=="table" and rawget(t,"FIRST_PERSON")~=nil then
+                                    t.FIRST_PERSON=false
+                                end
+                            end
+                        end)
+                        task.wait(0.8)
+                    end
+                end)
+            end
+        end})
 end
 
 addSubtabs('Movement', movementPages)
