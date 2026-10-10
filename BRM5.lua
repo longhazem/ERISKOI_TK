@@ -1681,10 +1681,17 @@ do
     local hlSettings = {
         npc     = {enabled=false,fillColor=Color3.fromRGB(255,170,0),  outlineColor=Color3.fromRGB(255,255,255),fillTransp=0.5,outlineTransp=0},
         players = {enabled=false,fillColor=Color3.fromRGB(255,50,50),  outlineColor=Color3.fromRGB(255,255,255),fillTransp=0.5,outlineTransp=0},
-        zombies = {enabled=false,fillColor=Color3.fromRGB(50,200,50),  outlineColor=Color3.fromRGB(255,255,255),fillTransp=0.5,outlineTransp=0},
+        -- zombies: per-ability fill colors (1=Crippled 2=Slow 3=Normal 4=Sprinter)
+        zombies = {enabled=false,
+            abilityColors={
+                [1]=Color3.fromRGB(148,74,0),
+                [2]=Color3.fromRGB(255,255,0),
+                [3]=Color3.fromRGB(255,0,0),
+                [4]=Color3.fromRGB(148,0,255),
+            },
+            outlineColor=Color3.fromRGB(255,255,255),fillTransp=0.5,outlineTransp=0},
         corpses = {enabled=false,fillColor=Color3.fromRGB(150,150,150),outlineColor=Color3.fromRGB(200,200,200),fillTransp=0.5,outlineTransp=0},
     }
-    local runnerFill = Color3.fromRGB(148,0,211)
     Sense.highlightSettings = hlSettings
     local function destroyHL(actor)
         if hlInstances[actor] then
@@ -1696,7 +1703,10 @@ do
         for actor,obj in pairs(Sense.objects) do
             local kind=Sense.Kind(actor)
             local cfg=kind and hlSettings[kind]
-            if cfg and cfg.enabled and obj.model and obj.model.Parent then
+            -- skip 3D-preview models (not in workspace) and team-mates
+            local inWorld=obj.model and obj.model.Parent and obj.model:IsDescendantOf(workspace)
+            local isTeammate=kind=="players" and Sense.teamSettings.players.teamCheck and Combat.IsTeammate(actor)
+            if cfg and cfg.enabled and inWorld and not isTeammate then
                 local hl=hlInstances[actor]
                 if not hl or not hl.Parent then
                     hl=Instance.new("Highlight")
@@ -1705,10 +1715,11 @@ do
                     hlInstances[actor]=hl
                 end
                 if kind=="zombies" then
-                    local hrp=obj.model:FindFirstChild("HumanoidRootPart")
-                    local isRunner=obj.model.Name:lower():find("run")~=nil
-                        or (hrp and hrp.AssemblyLinearVelocity.Magnitude>18)
-                    hl.FillColor=isRunner and runnerFill or cfg.fillColor
+                    local abilityColor
+                    if actor.Health and type(actor.Health)=="table" and actor.Health.Ability then
+                        abilityColor=cfg.abilityColors and cfg.abilityColors[actor.Health.Ability]
+                    end
+                    hl.FillColor=abilityColor or (cfg.abilityColors and cfg.abilityColors[3]) or Color3.fromRGB(255,0,0)
                 else
                     hl.FillColor=cfg.fillColor
                 end
@@ -2241,21 +2252,36 @@ local function buildTeamPage(page, team)
     local hlCfg = Sense.highlightSettings and Sense.highlightSettings[team]
     if hlCfg then
         local HLSec = page:AddSection({Title = "Highlight", Side = "Right"})
-        local hlText = team=="zombies" and "Highlight (Runner=Purple)" or "Highlight"
-        HLSec:AddToggle({Text=hlText,Flag=prefix.."hl_enabled",Default=false,
+        HLSec:AddToggle({Text="Highlight",Flag=prefix.."hl_enabled",Default=false,
             Callback=function(v) hlCfg.enabled=v end})
-        HLSec:AddColorPicker({Text="Fill Color",Flag=prefix.."hl_fill",
-            Default=hlCfg.fillColor,Transparency=hlCfg.fillTransp,
-            Callback=function(color,alpha)
-                hlCfg.fillColor=color
-                if alpha~=nil then hlCfg.fillTransp=alpha end
-            end})
+        if team=="zombies" then
+            -- 4 per-ability color pickers (1=Crippled 2=Slow 3=Normal 4=Sprinter)
+            local abilityLabels={[1]="Crippled (Brown)",[2]="Slow (Yellow)",[3]="Normal (Red)",[4]="Sprinter (Purple)"}
+            for ability=1,4 do
+                HLSec:AddColorPicker({
+                    Text=abilityLabels[ability],
+                    Flag=prefix.."hl_zb"..ability,
+                    Default=hlCfg.abilityColors[ability],
+                    Callback=function(color)
+                        hlCfg.abilityColors[ability]=color
+                    end
+                })
+            end
+        else
+            HLSec:AddColorPicker({Text="Fill Color",Flag=prefix.."hl_fill",
+                Default=hlCfg.fillColor,
+                Callback=function(color) hlCfg.fillColor=color end})
+        end
         HLSec:AddColorPicker({Text="Outline Color",Flag=prefix.."hl_outline",
-            Default=hlCfg.outlineColor,Transparency=hlCfg.outlineTransp,
-            Callback=function(color,alpha)
-                hlCfg.outlineColor=color
-                if alpha~=nil then hlCfg.outlineTransp=alpha end
-            end})
+            Default=hlCfg.outlineColor,
+            Callback=function(color) hlCfg.outlineColor=color end})
+        -- Transparency sliders: 0 = fully visible, 1 = invisible
+        HLSec:AddSlider({Text="Fill Transparency",Flag=prefix.."hl_fill_transp",
+            Min=0,Max=1,Default=hlCfg.fillTransp,Rounding=0.05,Suffix="",
+            Callback=function(v) hlCfg.fillTransp=v end})
+        HLSec:AddSlider({Text="Outline Transparency",Flag=prefix.."hl_outline_transp",
+            Min=0,Max=1,Default=hlCfg.outlineTransp,Rounding=0.05,Suffix="",
+            Callback=function(v) hlCfg.outlineTransp=v end})
     end
 end
 
@@ -2320,11 +2346,60 @@ SharedLeft:AddSlider({Text="Box Outline Thickness",Flag="npc_box_outline_thickne
 
 -- ── NIGHT VISION / THERMAL ────────────────────────────────────────
 do
-    local nvEffect,nvActive,nvMode=nil,false,"NightVision"
-    local nvModes={
-        NightVision={Brightness=0.5,Contrast=0.1,Saturation=-0.8,TintColor=Color3.fromRGB(130,255,130)},
-        Thermal    ={Brightness=0.3,Contrast=0.5,Saturation=-1,  TintColor=Color3.fromRGB(255,120,40)},
+    local nvEffect,nvActive,nvMode=nil,false,"Night Vision"
+    local NV_BUILTIN_KEYS={"Night Vision","Thermal"}
+    local NV_BUILTIN_CFG={
+        ["Night Vision"]={Brightness=0.5,Contrast=0.1,Saturation=-0.8,TintColor=Color3.fromRGB(130,255,130)},
+        ["Thermal"]     ={Brightness=0.3,Contrast=0.5,Saturation=-1,  TintColor=Color3.fromRGB(255,120,40)},
     }
+    local NV_PRESET_FILE="Tokaihub/BRM5/nv_presets.json"
+    local userPresets={}
+    pcall(function()
+        if isfile(NV_PRESET_FILE) then
+            local ok,decoded=pcall(function()
+                return game:GetService("HttpService"):JSONDecode(readfile(NV_PRESET_FILE))
+            end)
+            if ok and type(decoded)=="table" then
+                for name,cfg in pairs(decoded) do
+                    if type(cfg)=="table" then
+                        userPresets[name]={
+                            Brightness=tonumber(cfg.Brightness) or 0,
+                            Contrast  =tonumber(cfg.Contrast)   or 0,
+                            Saturation=tonumber(cfg.Saturation) or 0,
+                            TintColor =Color3.fromRGB(
+                                tonumber(cfg.R) or 255,
+                                tonumber(cfg.G) or 255,
+                                tonumber(cfg.B) or 255),
+                        }
+                    end
+                end
+            end
+        end
+    end)
+    local function savePresetsFile()
+        pcall(function()
+            local data={}
+            for name,cfg in pairs(userPresets) do
+                data[name]={
+                    Brightness=cfg.Brightness, Contrast=cfg.Contrast, Saturation=cfg.Saturation,
+                    R=math.floor(cfg.TintColor.R*255+0.5),
+                    G=math.floor(cfg.TintColor.G*255+0.5),
+                    B=math.floor(cfg.TintColor.B*255+0.5),
+                }
+            end
+            if not isfolder("Tokaihub/BRM5") then makefolder("Tokaihub/BRM5") end
+            writefile(NV_PRESET_FILE,game:GetService("HttpService"):JSONEncode(data))
+        end)
+    end
+    local function getDropdownList()
+        local list={}
+        for _,n in ipairs(NV_BUILTIN_KEYS) do list[#list+1]=n end
+        local userNames={}
+        for name in pairs(userPresets) do userNames[#userNames+1]=name end
+        table.sort(userNames)
+        for _,n in ipairs(userNames) do list[#list+1]=n end
+        return list
+    end
     local function applyNV()
         if not nvActive then
             if nvEffect then nvEffect:Destroy();nvEffect=nil end;return
@@ -2334,14 +2409,54 @@ do
             nvEffect=Instance.new("ColorCorrectionEffect")
             nvEffect.Name="ERISKOI_NV";nvEffect.Parent=Lighting
         end
-        local cfg=nvModes[nvMode] or nvModes.NightVision
+        local cfg=NV_BUILTIN_CFG[nvMode] or userPresets[nvMode] or NV_BUILTIN_CFG["Night Vision"]
         nvEffect.Brightness=cfg.Brightness;nvEffect.Contrast=cfg.Contrast
         nvEffect.Saturation=cfg.Saturation;nvEffect.TintColor=cfg.TintColor
     end
-    SharedLeft:AddToggle({Text="Night Vision / Thermal",Flag="nv_enabled",Default=false,
+    SharedLeft:AddToggle({Text="Night Vision",Flag="nv_enabled",Default=false,
         Callback=function(v) nvActive=v;applyNV() end})
-    SharedLeft:AddDropdown({Text="NV Mode",Flag="nv_mode",Options={"Night Vision","Thermal"},Default="Night Vision",
-        Callback=function(v) nvMode=v=="Thermal" and "Thermal" or "NightVision";applyNV() end})
+    SharedLeft:AddDropdown({Text="NV Mode",Flag="nv_mode",
+        Options=getDropdownList(),Default="Night Vision",
+        Callback=function(v) nvMode=v;applyNV() end})
+    -- Preset builder on the right side of the settings page
+    local NVPresetSec=SharedPage:AddSection({Title="NV Preset Builder",Side="Right"})
+    local NVRaw=SharedPage.Groups[#SharedPage.Groups]
+    NVRaw:AddInput("nv_preset_name",{Text="Preset Name",Placeholder="Enter name...",Default=""})
+    NVRaw:AddSlider("nv_build_brightness",{Text="Brightness",Min=-1,Max=1,Default=0,Rounding=2,Suffix=""})
+    NVRaw:AddSlider("nv_build_contrast",  {Text="Contrast",  Min=-1,Max=1,Default=0,Rounding=2,Suffix=""})
+    NVRaw:AddSlider("nv_build_saturation",{Text="Saturation",Min=-1,Max=1,Default=0,Rounding=2,Suffix=""})
+    NVPresetSec:AddToggle({Text="Custom Tint",Flag="nv_build_tint_enabled",Default=false,Callback=function() end})
+    NVPresetSec:AddColorPicker({Text="Tint Color",Flag="nv_build_tint",
+        Default=Color3.fromRGB(130,255,130),Callback=function() end})
+    NVRaw:AddButton("Save Preset",function()
+        local name=Options["nv_preset_name"] and tostring(Options["nv_preset_name"].Value) or ""
+        name=name:gsub("^%s+",""):gsub("%s+$","")
+        if name=="" then Library:Notify("Enter a preset name first.");return end
+        if NV_BUILTIN_CFG[name] then Library:Notify("Cannot overwrite built-in preset.");return end
+        local tintEnabled=Options["nv_build_tint_enabled"] and Options["nv_build_tint_enabled"].Value or false
+        local tintColor=tintEnabled and Options["nv_build_tint"] and Options["nv_build_tint"].Value or Color3.fromRGB(255,255,255)
+        userPresets[name]={
+            Brightness=Options["nv_build_brightness"] and Options["nv_build_brightness"].Value or 0,
+            Contrast  =Options["nv_build_contrast"]   and Options["nv_build_contrast"].Value   or 0,
+            Saturation=Options["nv_build_saturation"] and Options["nv_build_saturation"].Value or 0,
+            TintColor =tintColor,
+        }
+        savePresetsFile()
+        Options["nv_mode"]:SetValues(getDropdownList())
+        Library:Notify("Preset '"..name.."' saved.")
+    end)
+    NVRaw:AddButton("Delete Selected",function()
+        if NV_BUILTIN_CFG[nvMode] then Library:Notify("Cannot delete a built-in preset.");return end
+        if not userPresets[nvMode] then Library:Notify("No custom preset selected.");return end
+        local deleted=nvMode
+        userPresets[nvMode]=nil
+        savePresetsFile()
+        nvMode="Night Vision"
+        Options["nv_mode"]:SetValues(getDropdownList())
+        Options["nv_mode"]:SetValue("Night Vision")
+        applyNV()
+        Library:Notify("Preset '"..deleted.."' deleted.")
+    end)
     local prevDestroyNV=Combat.Destroy
     Combat.Destroy=function()
         if nvEffect then nvEffect:Destroy();nvEffect=nil end
@@ -2980,6 +3095,14 @@ do
         if not M.NoJumpDelay and now<(M.bunnyNextAttempt or 0) then return end
         if M.bunnyWaitingForAir and ctrl.VelocityGravity>0 then return end
         local jump=M.inputService and M.inputService._mounts and M.inputService._mounts.Jump
+        if type(jump)~="function" and M.inputService and M.inputService._mounts then
+            for k,v in pairs(M.inputService._mounts) do
+                if type(v)=="function" and tostring(k):lower():find("jump") then jump=v;break end
+            end
+        end
+        if type(jump)~="function" then
+            jump=M.inputService and type(M.inputService.Jump)=="function" and M.inputService.Jump or nil
+        end
         if type(jump)~="function" then return end
         local previousUp=ctrl._up
         -- Scope the cooldown override to this Bunny Hop request only.
@@ -4761,36 +4884,38 @@ end
 
 end
 
--- ── SPINBOT ───────────────────────────────────────────────────────
+-- ── SPINBOT + THIRD PERSON (merged into Movement page) ───────────
 do
-    local SpinbotPage=legacyPage(Tabs.Movement,movementPages,"Spinbot")
-    local SpinSec=SpinbotPage:AddSection({Title="Spinbot",Side="Left"})
-    local spinEnabled,spinSpeed,spinConn=false,5,nil
+    -- Spinbot — right side of the existing Movement page
+    local SpinSec=movementPages[1]:AddSection({Title="Spinbot",Side="Right"})
+    local spinEnabled,spinSpeed=false,5
     SpinSec:AddToggle({Text="Enable Spinbot",Flag="spinbot_enabled",Default=false,
         Callback=function(v)
             spinEnabled=v
-            if spinConn then spinConn:Disconnect();spinConn=nil end
+            AimRunService:UnbindFromRenderStep("ERISKOI_Spinbot")
             if spinEnabled then
-                spinConn=AimRunService.Heartbeat:Connect(function(dt)
+                AimRunService:BindToRenderStep("ERISKOI_Spinbot",2000,function(dt)
                     local char=AimLocalPlayer.Character
                     local hrp=char and char:FindFirstChild("HumanoidRootPart")
                     if hrp then
                         hrp.CFrame=hrp.CFrame*CFrame.Angles(0,math.rad(spinSpeed*dt*60),0)
                     end
                 end)
-                table.insert(Combat.connections,spinConn)
             end
         end})
-    SpinSec:AddSlider({Text="Spin Speed",Flag="spinbot_speed",Min=1,Max=20,Default=5,Suffix="",
+    SpinSec:AddSlider({Text="Spin Speed",Flag="spinbot_speed",Min=1,Max=20,Default=5,Rounding=1,Suffix="",
         Callback=function(v) spinSpeed=v end})
-    SpinSec:AddKeyPicker({Text="Spinbot",Flag="spinbot_key",Default="None",
-        Callback=function() end})
+    SpinSec:AddToggle({Text="Spinbot Key",Flag="spinbot_key_toggle",Default=false,Callback=function() end})
+    SpinSec:AddKeyPicker({Text="Spinbot",Flag="spinbot_key",Default="None",Mode="Toggle",Callback=function() end})
+    local prevDestroySpinbot=Combat.Destroy
+    Combat.Destroy=function()
+        AimRunService:UnbindFromRenderStep("ERISKOI_Spinbot")
+        prevDestroySpinbot()
+    end
 end
-
--- ── THIRD PERSON UNLOCK ───────────────────────────────────────────
 do
-    local CharPage=legacyPage(Tabs.Movement,movementPages,"Character")
-    local CharSec=CharPage:AddSection({Title="Third Person",Side="Left"})
+    -- Third Person Unlock — right side of the existing Movement page
+    local CharSec=movementPages[1]:AddSection({Title="Character",Side="Right"})
     local tpEnabled=false
     CharSec:AddToggle({Text="Third Person Unlock",Flag="thirdperson_enabled",Default=false,
         Callback=function(v)
