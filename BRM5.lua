@@ -1,4 +1,3 @@
-
 local repo = 'https://raw.githubusercontent.com/longhazem/ERISKOI_TK/main/'
 
 local LibrarySourceUrl = 'https://raw.githubusercontent.com/longhazem/ERISKOI_TK/main/LinoriaSrc.lua'
@@ -1616,7 +1615,11 @@ local Sense = (function()
                     label=a.DisplayName or (a.OwnerName~="???" and a.OwnerName) or (a.Zombie and "Zombie" or "NPC")
                     if not o.preview then label=tostring(label).." ["..tostring(a.UID):sub(1,6).."]" end
                 end
-                if kind=="zombies" then label="Zombie"
+                if kind=="zombies" then
+                    label=(o.model and o.model.Name or "Zombie"):gsub("^AI_",""):gsub("_+"," "):gsub("^ ",""):gsub(" $","")
+                    local _abilityTag={[1]="Crippled",[2]="Slow",[3]="Normal",[4]="Sprinter"}
+                    local _ab=a.Health and type(a.Health)=="table" and a.Health.Ability
+                    if _ab and _abilityTag[_ab] then label=label.." ["..(_abilityTag[_ab]).."]" end
                 elseif kind=="corpses" then label="Corpse: "..(a.Zombie and "Zombie" or (E.IsPlayer(a) and a.Owner.Name or "NPC")) end
                 textAt(o,"name",label,Vector2.new(cx,min.Y-shared.textSize-3),t.nameColor,t.nameOutline,override)
             end
@@ -1681,8 +1684,10 @@ do
     local hlSettings = {
         npc     = {enabled=false,fillColor=Color3.fromRGB(255,170,0),  outlineColor=Color3.fromRGB(255,255,255),fillTransp=0.5,outlineTransp=0},
         players = {enabled=false,fillColor=Color3.fromRGB(255,50,50),  outlineColor=Color3.fromRGB(255,255,255),fillTransp=0.5,outlineTransp=0},
-        -- zombies: per-ability fill colors (1=Crippled 2=Slow 3=Normal 4=Sprinter)
+        -- zombies: single fill OR per-ability fill colors (1=Crippled 2=Slow 3=Normal 4=Sprinter)
         zombies = {enabled=false,
+            useAbilityColors=true,
+            fillColor=Color3.fromRGB(255,50,0),
             abilityColors={
                 [1]=Color3.fromRGB(148,74,0),
                 [2]=Color3.fromRGB(255,255,0),
@@ -1706,7 +1711,8 @@ do
             -- skip 3D-preview models (not in workspace) and team-mates
             local inWorld=obj.model and obj.model.Parent and obj.model:IsDescendantOf(workspace)
             local isTeammate=kind=="players" and Sense.teamSettings.players.teamCheck and Combat.IsTeammate(actor)
-            if cfg and cfg.enabled and inWorld and not isTeammate then
+            local espEnabled = Sense.teamSettings[kind] and Sense.teamSettings[kind].enabled
+            if cfg and cfg.enabled and espEnabled and inWorld and not isTeammate then
                 local hl=hlInstances[actor]
                 if not hl or not hl.Parent then
                     hl=Instance.new("Highlight")
@@ -1715,11 +1721,16 @@ do
                     hlInstances[actor]=hl
                 end
                 if kind=="zombies" then
-                    local abilityColor
-                    if actor.Health and type(actor.Health)=="table" and actor.Health.Ability then
-                        abilityColor=cfg.abilityColors and cfg.abilityColors[actor.Health.Ability]
+                    local fillColor
+                    if cfg.useAbilityColors then
+                        if actor.Health and type(actor.Health)=="table" and actor.Health.Ability then
+                            fillColor=cfg.abilityColors and cfg.abilityColors[actor.Health.Ability]
+                        end
+                        fillColor=fillColor or (cfg.abilityColors and cfg.abilityColors[3]) or Color3.fromRGB(255,0,0)
+                    else
+                        fillColor=cfg.fillColor or Color3.fromRGB(255,50,0)
                     end
-                    hl.FillColor=abilityColor or (cfg.abilityColors and cfg.abilityColors[3]) or Color3.fromRGB(255,0,0)
+                    hl.FillColor=fillColor
                 else
                     hl.FillColor=cfg.fillColor
                 end
@@ -1769,7 +1780,7 @@ local function visualPage(name)
         function section:AddSlider(data)
             local control = group:AddSlider(data.Flag, {
                 Text = data.Text, Default = data.Default, Min = data.Min, Max = data.Max,
-                Rounding = 0, Suffix = data.Suffix or '',
+                Rounding = data.Rounding or 0, Suffix = data.Suffix or '',
             })
             control:OnChanged(data.Callback)
             return control
@@ -2255,8 +2266,14 @@ local function buildTeamPage(page, team)
         HLSec:AddToggle({Text="Highlight",Flag=prefix.."hl_enabled",Default=false,
             Callback=function(v) hlCfg.enabled=v end})
         if team=="zombies" then
+            -- Simple fill color (tipmobile style: single color for all zombies)
+            HLSec:AddToggle({Text="Per-Ability Colors",Flag=prefix.."hl_zb_ability_mode",Default=true,
+                Callback=function(v) hlCfg.useAbilityColors=v end})
+            HLSec:AddColorPicker({Text="Fill Color",Flag=prefix.."hl_zb_fill",
+                Default=hlCfg.fillColor,
+                Callback=function(color) hlCfg.fillColor=color end})
             -- 4 per-ability color pickers (1=Crippled 2=Slow 3=Normal 4=Sprinter)
-            local abilityLabels={[1]="Crippled (Brown)",[2]="Slow (Yellow)",[3]="Normal (Red)",[4]="Sprinter (Purple)"}
+            local abilityLabels={[1]="Zombie Crippled",[2]="Zombie Slow",[3]="Zombie Normal",[4]="Zombie Sprinter"}
             for ability=1,4 do
                 HLSec:AddColorPicker({
                     Text=abilityLabels[ability],
@@ -3828,6 +3845,123 @@ do
             for k,v in pairs(values or {}) do local name=type(k)=="number" and v or (v and k);if map[name] then selected[map[name]]=true end end
             A.Targets=selected
         end})
+
+    -- ── Aura Kill V2 ──────────────────────────────────────────────────────────
+    -- Pipeline: InventoryAction "Slash" → InventoryAction "Impact"
+    -- Server-trusted hit registration — zero proximity required
+    local AK2: {[string]: any} = {
+        enabled     = false,
+        killAI      = true,
+        killZombie  = true,
+        killPlayer  = false,
+        hitPart     = "Head",
+        maxPerCycle = 12,
+        cooldown    = 0.15,
+        headYOffset = 1.5,
+        _lastFire   = {},
+        _net        = nil,
+        _netRetry   = 0,
+    }
+    Combat.AK2 = AK2
+
+    local function AK2_findNet()
+        if AK2._net then return AK2._net end
+        if os.clock() < AK2._netRetry then return nil end
+        AK2._netRetry = os.clock() + 1
+        -- Primary: getupvalues on Replicator.Update
+        local inspect = (debug and debug.getupvalues) or getupvalues
+        local svc = Combat.Service()
+        local rep = svc and svc.Replicator
+        if inspect and rep and type(rep.Update) == "function" then
+            local ok, vals = pcall(inspect, rep.Update)
+            if ok and type(vals) == "table" then
+                for _, v in pairs(vals) do
+                    if type(v) == "table" then
+                        local ok2, fs = pcall(function() return v.FireServer end)
+                        if ok2 and type(fs) == "function" then AK2._net = v; return v end
+                    end
+                end
+            end
+        end
+        -- Fallback: getgc scan matching _events table + FireServer method
+        if getgc then
+            for _, v in ipairs(getgc(true)) do
+                if type(v) == "table"
+                and type(rawget(v, "FireServer")) == "function"
+                and type(rawget(v, "_events"))    == "table" then
+                    local ev = rawget(v, "_events")
+                    if rawget(ev, "ReplicateBulkActor") ~= nil
+                    or rawget(ev, "RegisterActor")      ~= nil then
+                        AK2._net = v; return v
+                    end
+                end
+            end
+        end
+        return nil
+    end
+
+    local function AK2_fire(net, ...)
+        local ok, err = pcall(net.FireServer, net, ...)
+        if not ok then AK2._net = nil end  -- invalidate stale net on error
+    end
+
+    table.insert(Combat.connections, AimRunService.Heartbeat:Connect(function()
+        if not AK2.enabled then return end
+        local net = AK2_findNet()
+        if not net then return end
+        local svc = Combat.Service()
+        local registry = svc and svc.Replicator and svc.Replicator.Actors
+        if not registry then return end
+        local now = tick(); local count = 0
+        for uid, a in pairs(registry) do
+            if count >= AK2.maxPerCycle then break end
+            if not Combat.IsAlive(a) then continue end
+            local kind = Combat.Kind(a)
+            if not kind then continue end
+            local allow = false
+            if kind == "Zombies" and AK2.killZombie then allow = true end
+            if kind == "NPCs"    and AK2.killAI     then allow = true end
+            if kind == "Players" and AK2.killPlayer then allow = true end
+            if not allow then continue end
+            if (now - (AK2._lastFire[uid] or 0)) < AK2.cooldown then continue end
+            local pos = a.Position
+            if typeof(pos) ~= "Vector3" then continue end
+            AK2._lastFire[uid] = now
+            local hitPos = { pos.X, pos.Y + AK2.headYOffset, pos.Z }
+            local slashArg = math.random(1, 3)
+            AK2_fire(net, "InventoryAction", "Slash", slashArg)
+            task.delay(0, function()
+                if not AK2.enabled then return end
+                local n = AK2_findNet(); if not n then return end
+                AK2_fire(n, "InventoryAction", "Impact", hitPos, uid, AK2.hitPart)
+            end)
+            count = count + 1
+        end
+    end))
+
+    local ak2l = mp:AddSection({Title="Aura Kill V2",Side="Left"})
+    ak2l:AddToggle({Text="Enable",Flag="ak2_enabled",Default=false,
+        Callback=function(v) AK2.enabled=v end})
+    ak2l:AddToggle({Text="Kill NPCs",Flag="ak2_kill_ai",Default=true,
+        Callback=function(v) AK2.killAI=v end})
+    ak2l:AddToggle({Text="Kill Zombies",Flag="ak2_kill_zombie",Default=true,
+        Callback=function(v) AK2.killZombie=v end})
+    ak2l:AddToggle({Text="Kill Players",Flag="ak2_kill_player",Default=false,
+        Callback=function(v) AK2.killPlayer=v end})
+    ak2l:AddDropdown({Text="Hit Part",Flag="ak2_hitpart",
+        Options={"Head","UpperTorso","LowerTorso","LeftUpperArm","RightUpperArm","LeftUpperLeg","RightUpperLeg"},
+        Default="Head",
+        Callback=function(v) AK2.hitPart=v end})
+    ak2l:AddSlider({Text="Max Targets/Tick",Flag="ak2_max_targets",
+        Min=1,Max=30,Default=12,Rounding=1,Suffix="",
+        Callback=function(v) AK2.maxPerCycle=math.clamp(v,1,30) end})
+    ak2l:AddSlider({Text="Hit Cooldown",Flag="ak2_cooldown",
+        Min=0.05,Max=2.0,Default=0.15,Rounding=0.05,Suffix=" s",
+        Callback=function(v) AK2.cooldown=math.clamp(v,0.05,2.0) end})
+    ak2l:AddSlider({Text="Head Y Offset",Flag="ak2_head_y_offset",
+        Min=0.5,Max=2.5,Default=1.5,Rounding=0.05,Suffix=" st",
+        Callback=function(v) AK2.headYOffset=math.clamp(v,0.5,2.5) end})
+
     local vp=VehiclePage
     local vl=vp:AddSection({Title="Driving",Side="Left"});local vr=vp:AddSection({Title="Flight",Side="Right"})
     toggle(vl,"Speed Mod",V,"Speed","vehicle_speed")
