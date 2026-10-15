@@ -2273,7 +2273,7 @@ local function buildTeamPage(page, team)
                 Default=hlCfg.fillColor,
                 Callback=function(color) hlCfg.fillColor=color end})
             -- 4 per-ability color pickers (1=Crippled 2=Slow 3=Normal 4=Sprinter)
-            local abilityLabels={[1]="Zombie Crippled",[2]="Zombie Slow",[3]="Zombie Normal",[4]="Zombie Sprinter"}
+            local abilityLabels={[1]="Zombie: Crippled",[2]="Zombie: Slow",[3]="Zombie: Normal",[4]="Zombie: Sprinter"}
             for ability=1,4 do
                 HLSec:AddColorPicker({
                     Text=abilityLabels[ability],
