@@ -1694,6 +1694,7 @@ do
                 [3]=Color3.fromRGB(255,0,0),
                 [4]=Color3.fromRGB(148,0,255),
             },
+            abilityEnabled={[1]=true,[2]=true,[3]=true,[4]=true},
             outlineColor=Color3.fromRGB(255,255,255),fillTransp=0.5,outlineTransp=0},
         corpses = {enabled=false,fillColor=Color3.fromRGB(150,150,150),outlineColor=Color3.fromRGB(200,200,200),fillTransp=0.5,outlineTransp=0},
     }
