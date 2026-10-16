@@ -1722,15 +1722,13 @@ do
                     hlInstances[actor]=hl
                 end
                 if kind=="zombies" then
-                    local fillColor
-                    if cfg.useAbilityColors then
-                        if actor.Health and type(actor.Health)=="table" and actor.Health.Ability then
-                            fillColor=cfg.abilityColors and cfg.abilityColors[actor.Health.Ability]
-                        end
-                        fillColor=fillColor or (cfg.abilityColors and cfg.abilityColors[3]) or Color3.fromRGB(255,0,0)
-                    else
-                        fillColor=cfg.fillColor or Color3.fromRGB(255,50,0)
+                    local ability=actor.Health and type(actor.Health)=="table" and actor.Health.Ability
+                    -- per-ability toggle: if this type is disabled, destroy and skip
+                    if ability and cfg.abilityEnabled and cfg.abilityEnabled[ability]==false then
+                        destroyHL(actor); continue
                     end
+                    local fillColor=(ability and cfg.abilityColors and cfg.abilityColors[ability])
+                        or (cfg.abilityColors and cfg.abilityColors[3]) or Color3.fromRGB(255,0,0)
                     hl.FillColor=fillColor
                 else
                     hl.FillColor=cfg.fillColor
@@ -2267,23 +2265,19 @@ local function buildTeamPage(page, team)
         HLSec:AddToggle({Text="Highlight",Flag=prefix.."hl_enabled",Default=false,
             Callback=function(v) hlCfg.enabled=v end})
         if team=="zombies" then
-            -- Simple fill color (tipmobile style: single color for all zombies)
-            HLSec:AddToggle({Text="Per-Ability Colors",Flag=prefix.."hl_zb_ability_mode",Default=true,
-                Callback=function(v) hlCfg.useAbilityColors=v end})
-            HLSec:AddColorPicker({Text="Fill Color",Flag=prefix.."hl_zb_fill",
-                Default=hlCfg.fillColor,
-                Callback=function(color) hlCfg.fillColor=color end})
-            -- 4 per-ability color pickers (1=Crippled 2=Slow 3=Normal 4=Sprinter)
+            -- tipmobile style: each zombie type = own row [toggle] + [color], ordered Crippled/Slow/Normal/Sprinter
             local abilityLabels={[1]="Zombie: Crippled",[2]="Zombie: Slow",[3]="Zombie: Normal",[4]="Zombie: Sprinter"}
             for ability=1,4 do
-                HLSec:AddColorPicker({
-                    Text=abilityLabels[ability],
-                    Flag=prefix.."hl_zb"..ability,
-                    Default=hlCfg.abilityColors[ability],
-                    Callback=function(color)
-                        hlCfg.abilityColors[ability]=color
-                    end
-                })
+                local ab=ability
+                HLSec:AddToggle({Text=abilityLabels[ab],Flag=prefix.."hl_zb_en"..ab,
+                    Default=(hlCfg.abilityEnabled==nil or hlCfg.abilityEnabled[ab]~=false),
+                    Callback=function(v)
+                        if not hlCfg.abilityEnabled then hlCfg.abilityEnabled={[1]=true,[2]=true,[3]=true,[4]=true} end
+                        hlCfg.abilityEnabled[ab]=v
+                    end})
+                HLSec:AddColorPicker({Text="Color",Flag=prefix.."hl_zb"..ab,
+                    Default=hlCfg.abilityColors[ab],
+                    Callback=function(color) hlCfg.abilityColors[ab]=color end})
             end
         else
             HLSec:AddColorPicker({Text="Fill Color",Flag=prefix.."hl_fill",
