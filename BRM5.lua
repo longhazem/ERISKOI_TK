@@ -2289,10 +2289,10 @@ local function buildTeamPage(page, team)
             Callback=function(color) hlCfg.outlineColor=color end})
         -- Transparency sliders: 0 = fully visible, 1 = invisible
         HLSec:AddSlider({Text="Fill Transparency",Flag=prefix.."hl_fill_transp",
-            Min=0,Max=1,Default=hlCfg.fillTransp,Rounding=0.05,Suffix="",
+            Min=0,Max=1,Default=hlCfg.fillTransp,Rounding=2,Suffix="",
             Callback=function(v) hlCfg.fillTransp=v end})
         HLSec:AddSlider({Text="Outline Transparency",Flag=prefix.."hl_outline_transp",
-            Min=0,Max=1,Default=hlCfg.outlineTransp,Rounding=0.05,Suffix="",
+            Min=0,Max=1,Default=hlCfg.outlineTransp,Rounding=2,Suffix="",
             Callback=function(v) hlCfg.outlineTransp=v end})
     end
 end
