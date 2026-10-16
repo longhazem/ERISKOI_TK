@@ -1037,6 +1037,8 @@ local Sense = (function()
         E.chams[kind]=table.clone(E.chams.npc)
         E.advanced[kind]=table.clone(E.advanced.npc)
     end
+    -- per-ability type filter: when false, hides ALL ESP for that zombie type
+    E.teamSettings.zombies.abilityFilter={[1]=true,[2]=true,[3]=true,[4]=true}
     local service, resolveAt, connection, anchor
     local signs = {Vector3.new(-1,-1,-1),Vector3.new(-1,1,-1),Vector3.new(-1,1,1),Vector3.new(-1,-1,1),
         Vector3.new(1,-1,-1),Vector3.new(1,1,-1),Vector3.new(1,1,1),Vector3.new(1,-1,1)}
@@ -1525,6 +1527,12 @@ local Sense = (function()
         local kind=o.preview and a.Kind or E.Kind(a)
         if o.preview then o.previewViewportSize=camera.ViewportSize end
         if not kind then return end
+        -- per-zombie-type visibility filter
+        if kind=="zombies" then
+            local ability=a.Health and type(a.Health)=="table" and a.Health.Ability
+            local filter=E.teamSettings.zombies.abilityFilter
+            if ability and filter and filter[ability]==false then return end
+        end
         local t=E.teamSettings[kind]
         local enabledChams=E.chams[kind] and E.chams[kind].enabled
         local enabledSkeleton=E.advanced[kind] and E.advanced[kind].skeleton
