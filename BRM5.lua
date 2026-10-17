@@ -1717,8 +1717,8 @@ do
         for actor,obj in pairs(Sense.objects) do
             local kind=Sense.Kind(actor)
             local cfg=kind and hlSettings[kind]
-            -- skip 3D-preview models (not in workspace) and team-mates
-            local inWorld=obj.model and obj.model.Parent and obj.model:IsDescendantOf(workspace)
+            -- allow preview models (WorldModel viewport) or real world models
+            local inWorld=obj.model and obj.model.Parent and (obj.preview or obj.model:IsDescendantOf(workspace))
             local isTeammate=kind=="players" and Sense.teamSettings.players.teamCheck and Combat.IsTeammate(actor)
             local espEnabled = Sense.teamSettings[kind] and Sense.teamSettings[kind].enabled
             if cfg and cfg.enabled and espEnabled and inWorld and not isTeammate then
@@ -1731,7 +1731,12 @@ do
                 end
                 if kind=="zombies" then
                     local ability=actor.Health and type(actor.Health)=="table" and actor.Health.Ability
-                    -- per-ability toggle: if this type is disabled, destroy and skip
+                    -- full ESP type filter: if this zombie type is filtered out, hide highlight too
+                    local typeFilter=Sense.teamSettings.zombies and Sense.teamSettings.zombies.abilityFilter
+                    if ability and typeFilter and typeFilter[ability]==false then
+                        destroyHL(actor); continue
+                    end
+                    -- per-ability highlight toggle: if this type's highlight is disabled, destroy and skip
                     if ability and cfg.abilityEnabled and cfg.abilityEnabled[ability]==false then
                         destroyHL(actor); continue
                     end
@@ -2319,6 +2324,17 @@ for _,entry in ipairs({{ZombiePage,"zombies"},{CorpsePage,"corpses"}}) do
     general:AddToggle({Text="ESP Enabled",Flag=kind.."_enabled",Default=false,
         Callback=function(v) Sense.teamSettings[kind].enabled=v end})
     addESPDistance(general,kind)
+    if kind=="zombies" then
+        -- per-type ESP filter: toggle off → hides box/name/highlight/everything for that ability type
+        local TypeSec=page:AddSection({Title="Zombie Types",Side="Left"})
+        local typeFilter=Sense.teamSettings.zombies.abilityFilter
+        local abilityLabels={[1]="Zombie: Crippled",[2]="Zombie: Slow",[3]="Zombie: Normal",[4]="Zombie: Sprinter"}
+        for ability=1,4 do
+            local ab=ability
+            TypeSec:AddToggle({Text=abilityLabels[ab],Flag="zb_type_filter"..ab,Default=true,
+                Callback=function(v) typeFilter[ab]=v end})
+        end
+    end
     buildTeamPage(page,kind)
 end
 -- Settings page ───────────────────────────────────────────────
@@ -5025,25 +5041,30 @@ end
 do
     -- Spinbot — right side of the existing Movement page
     local SpinSec=movementPages[1]:AddSection({Title="Spinbot",Side="Right"})
-    local spinEnabled,spinSpeed=false,5
-    SpinSec:AddToggle({Text="Enable Spinbot",Flag="spinbot_enabled",Default=false,
-        Callback=function(v)
-            spinEnabled=v
-            AimRunService:UnbindFromRenderStep("ERISKOI_Spinbot")
-            if spinEnabled then
-                AimRunService:BindToRenderStep("ERISKOI_Spinbot",2000,function(dt)
-                    local char=AimLocalPlayer.Character
-                    local hrp=char and char:FindFirstChild("HumanoidRootPart")
-                    if hrp then
-                        hrp.CFrame=hrp.CFrame*CFrame.Angles(0,math.rad(spinSpeed*dt*60),0)
-                    end
-                end)
+    local spinEnabled,spinSpeed,spinAngle=false,5,0
+    local spinKey=nil
+    local function bindSpin()
+        AimRunService:UnbindFromRenderStep("ERISKOI_Spinbot")
+        if not spinEnabled then return end
+        AimRunService:BindToRenderStep("ERISKOI_Spinbot",2000,function(dt)
+            -- key gate: if a key is bound, only spin while key is active
+            if spinKey and spinKey.Value~="None" and not spinKey:GetState() then return end
+            local char=AimLocalPlayer.Character
+            local hrp=char and char:FindFirstChild("HumanoidRootPart")
+            if hrp then
+                spinAngle=(spinAngle+spinSpeed*dt*60)%360
+                local vel=hrp.AssemblyLinearVelocity
+                hrp.CFrame=CFrame.new(hrp.Position)*CFrame.Angles(0,math.rad(spinAngle),0)
+                hrp.AssemblyLinearVelocity=vel
             end
-        end})
+        end)
+    end
+    SpinSec:AddToggle({Text="Enable Spinbot",Flag="spinbot_enabled",Default=false,
+        Callback=function(v) spinEnabled=v;bindSpin() end})
     SpinSec:AddSlider({Text="Spin Speed",Flag="spinbot_speed",Min=1,Max=20,Default=5,Rounding=1,Suffix="",
         Callback=function(v) spinSpeed=v end})
     SpinSec:AddToggle({Text="Spinbot Key",Flag="spinbot_key_toggle",Default=false,Callback=function() end})
-    SpinSec:AddKeyPicker({Text="Spinbot",Flag="spinbot_key",Default="None",Mode="Toggle",Callback=function() end})
+    spinKey=SpinSec:AddKeyPicker({Text="Spinbot",Flag="spinbot_key",Default="None",Mode="Toggle",Callback=function() end})
     local prevDestroySpinbot=Combat.Destroy
     Combat.Destroy=function()
         AimRunService:UnbindFromRenderStep("ERISKOI_Spinbot")
@@ -5257,9 +5278,9 @@ for _,picker in pairs(Options) do
     if picker.Type=="KeyPicker" then
         local update=picker.Update
         picker.Update=function(self,...)
-            local result=table.pack(update(self,...))
+            local ok,result=pcall(function() return table.pack(update(self,...)) end)
             resizeKeybinds()
-            return table.unpack(result,1,result.n)
+            if ok and result then return table.unpack(result,1,result.n) end
         end
     end
 end
@@ -5276,7 +5297,8 @@ for _,picker in pairs(Options) do
         if picker.DoClick then
             local click=picker.DoClick
             picker.DoClick=function(self,...)
-                if Library:IsTyping() then self.Toggled=not self.Toggled;return end
+                -- don't try to open another keybind dialog while one is already open
+                if Library:IsTyping() then return end
                 return click(self,...)
             end
         end
