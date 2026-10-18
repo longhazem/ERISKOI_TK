@@ -471,6 +471,7 @@ function Combat.TriggerTarget(settings,camera,mouse)
 end
 function Combat.KeyActive(picker,_state)
     if Library:IsTyping() or picker==nil then return false end
+    if picker.GetState==nil then return picker.Value=="None" end
     return picker.Value=="None" or picker:GetState()==true
 end
 function Combat.RageActive()
@@ -5290,9 +5291,12 @@ resizeKeybinds()
 -- which has been marked to be one that auto loads!
 for _,picker in pairs(Options) do
     if picker.Type=="KeyPicker" then
-        local getState=picker.GetState
-        picker.GetState=function(self)
-            return not Library:IsTyping() and getState(self)
+        if picker.GetState then
+            local getState=picker.GetState
+            picker.GetState=function(self)
+                if Library:IsTyping() then return false end
+                return getState(self)
+            end
         end
         if picker.DoClick then
             local click=picker.DoClick
