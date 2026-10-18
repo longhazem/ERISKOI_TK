@@ -3396,19 +3396,70 @@ do
     local SpinSec = movementPages[1]:AddSection({Title="Spinbot", Side="Right"})
     local spinEnabled = false
     local spinSpeed = 20
+    local spinHeartConn = nil
+    local spinCC = nil  -- hooked CharacterCamera ref
+
+    -- Layer 1: hook CharacterCamera.Update (same technique as reference script)
+    -- Sets actor.Orientation/GoalOrientation/CameraX so the camera tracks the spin client-side
+    local function hookCameraUpdate()
+        if spinCC then return end
+        local cc = getgenv and getgenv().CharacterCamera
+        if not cc then
+            for _, obj in pairs(getgc(true)) do
+                if type(obj)=="table" and rawget(obj,"Update") and rawget(obj,"Render") and rawget(obj,"Watch") then
+                    cc = obj; break
+                end
+            end
+        end
+        if not cc or not cc.Update or cc._spinbotOrig then return end
+        cc._spinbotOrig = cc.Update
+        cc.Update = function(self, ...)
+            local res = cc._spinbotOrig(self, ...)
+            if spinEnabled then
+                local ok, svc = pcall(Combat.Service)
+                local actor = ok and svc and svc.Replicator and svc.Replicator.LocalActor
+                if actor and actor.Alive then
+                    local yaw = (tick() * spinSpeed) % (math.pi * 2)
+                    actor.Orientation = yaw; actor.GoalOrientation = yaw; actor.CameraX = yaw
+                end
+            end
+            return res
+        end
+        spinCC = cc
+    end
 
     local function bindSpin()
+        if spinHeartConn then spinHeartConn:Disconnect(); spinHeartConn = nil end
         AimRunService:UnbindFromRenderStep("ERISKOI_Spinbot")
         if not spinEnabled then return end
-        AimRunService:BindToRenderStep("ERISKOI_Spinbot", 2000, function()
-            local char = AimLocalPlayer.Character
-            local hrp = char and char:FindFirstChild("HumanoidRootPart")
-            if hrp then
-                local yaw = (tick() * spinSpeed) % (math.pi * 2)
-                local vel = hrp.AssemblyLinearVelocity
-                hrp.CFrame = CFrame.new(hrp.Position) * CFrame.Angles(0, yaw, 0)
-                hrp.AssemblyLinearVelocity = vel
+        pcall(hookCameraUpdate)
+        -- Layer 2 (Heartbeat): drives actor orientation fields + actor.CFrame → replicator reads these
+        -- Layer 3 (RenderStep 2000): keeps visual root.CFrame in sync after character controller runs
+        spinHeartConn = AimRunService.Heartbeat:Connect(function()
+            local ok, svc = pcall(Combat.Service)
+            local actor = ok and svc and svc.Replicator and svc.Replicator.LocalActor
+            if not actor or not actor.Alive then return end
+            local root = actor.RootPart
+            if not root then return end
+            local yaw = (tick() * spinSpeed) % (math.pi * 2)
+            -- actor orientation fields (network replication path, same as reference script)
+            actor.Orientation = yaw; actor.GoalOrientation = yaw
+            actor.CameraX = yaw; actor.CameraY = 0
+            -- actor.CFrame rotation (BRM5 replication layer)
+            if typeof(actor.CFrame) == "CFrame" then
+                actor.CFrame = CFrame.new(actor.Position) * CFrame.Angles(0, yaw, 0)
             end
+        end)
+        AimRunService:BindToRenderStep("ERISKOI_Spinbot", 2000, function()
+            local ok, svc = pcall(Combat.Service)
+            local actor = ok and svc and svc.Replicator and svc.Replicator.LocalActor
+            if not actor or not actor.Alive then return end
+            local root = actor.RootPart
+            if not root then return end
+            local yaw = (tick() * spinSpeed) % (math.pi * 2)
+            local vel = root.AssemblyLinearVelocity
+            root.CFrame = CFrame.new(root.Position) * CFrame.Angles(0, yaw, 0)
+            root.AssemblyLinearVelocity = vel
         end)
     end
 
@@ -3419,7 +3470,12 @@ do
 
     local prevDestroySpinbot = Combat.Destroy
     Combat.Destroy = function()
+        if spinHeartConn then spinHeartConn:Disconnect(); spinHeartConn = nil end
         AimRunService:UnbindFromRenderStep("ERISKOI_Spinbot")
+        if spinCC and spinCC._spinbotOrig then
+            spinCC.Update = spinCC._spinbotOrig; spinCC._spinbotOrig = nil
+        end
+        spinCC = nil
         prevDestroySpinbot()
     end
 end
@@ -3893,8 +3949,10 @@ do
         maxPerCycle = 12,
         cooldown    = 0.15,
         headYOffset = 1.5,
+        range       = 30,
         _lastFire   = {},
         _net        = nil,
+        _remote     = nil,
         _netRetry   = 0,
     }
     Combat.AK2 = AK2
@@ -3903,7 +3961,14 @@ do
         if AK2._net then return AK2._net end
         if os.clock() < AK2._netRetry then return nil end
         AK2._netRetry = os.clock() + 1
-        -- Primary: getupvalues on Replicator.Update
+        -- Method 0: shared.import("network") — cleanest, verified via oldvis RSpy dump
+        if shared and type(shared.import) == "function" then
+            local ok, net = pcall(function() return shared.import("network") end)
+            if ok and net and rawget(net, "_key") and rawget(net, "_code") then
+                AK2._net = net; return net
+            end
+        end
+        -- Method 1: getupvalues on Replicator.Update
         local inspect = (debug and debug.getupvalues) or getupvalues
         local svc = Combat.Service()
         local rep = svc and svc.Replicator
@@ -3918,15 +3983,26 @@ do
                 end
             end
         end
-        -- Fallback: getgc scan matching _events table + FireServer method
-        if getgc then
-            for _, v in ipairs(getgc(true)) do
-                if type(v) == "table"
-                and type(rawget(v, "FireServer")) == "function"
-                and type(rawget(v, "_events"))    == "table" then
-                    local ev = rawget(v, "_events")
-                    if rawget(ev, "ReplicateBulkActor") ~= nil
-                    or rawget(ev, "RegisterActor")      ~= nil then
+        -- Method 2: GC scan — cipher net (_code+_key+_events) OR direct net (FireServer+_events)
+        local gok, gc = pcall(function() return filtergc("table") end)
+        if not gok then gok, gc = pcall(function() return getgc(true) end) end
+        if gok and gc then
+            for _, v in ipairs(gc) do
+                if type(v) ~= "table" then continue end
+                local k  = rawget(v, "_key")
+                local co = rawget(v, "_code")
+                local ev = rawget(v, "_events")
+                -- Cipher net pattern: _code (UUID) + _key (5 nums) + _events
+                if type(k)=="table" and #k>=5
+                    and type(co)=="string" and co:match("^%x+%-%x+%-%x+%-%x+%-%x+$")
+                    and type(ev)=="table" then
+                    local allNums = true
+                    for _, n in ipairs(k) do if type(n)~="number" then allNums=false; break end end
+                    if allNums then AK2._net = v; return v end
+                end
+                -- Direct net pattern: FireServer method + known event keys
+                if type(rawget(v, "FireServer"))=="function" and type(ev)=="table" then
+                    if rawget(ev, "ReplicateBulkActor") ~= nil or rawget(ev, "RegisterActor") ~= nil then
                         AK2._net = v; return v
                     end
                 end
@@ -3935,9 +4011,59 @@ do
         return nil
     end
 
+    -- RemoteEvent via ReplicatedStorage.Events — fallback for cipher path (oldvis verified)
+    local function AK2_getRemote()
+        if AK2._remote and AK2._remote.Parent then return AK2._remote end
+        local ev = game:GetService("ReplicatedStorage"):FindFirstChild("Events")
+        if ev then
+            local re = ev:FindFirstChild("RemoteEvent")
+            if re then AK2._remote = re; return re end
+        end
+        for _, v in ipairs(game:GetService("ReplicatedStorage"):GetDescendants()) do
+            if v:IsA("RemoteEvent") then AK2._remote = v; return v end
+        end
+        return nil
+    end
+
+    -- XOR-rotation cipher — exact match from Flux_client.lua, verified vs RSpy dump (oldvis)
+    local function AK2_netEncode(jsonStr, key)
+        local result = ""
+        for i = 1, #jsonStr do
+            local ki   = i % 4
+            local kval = key[ki + 1]
+            local nb   = (string.byte(jsonStr, i) - 32 + kval) % 95 + 32
+            result = result .. string.char(nb)
+        end
+        local firstByte = string.byte(jsonStr, 1)
+        for v24 = 1, key[5] do
+            local v27 = firstByte - string.byte(tostring(v24), 1)
+            result = result .. string.char(v27)
+        end
+        return result
+    end
+
     local function AK2_fire(net, ...)
-        local ok, err = pcall(net.FireServer, net, ...)
-        if not ok then AK2._net = nil end  -- invalidate stale net on error
+        -- Cipher path: net has _code + _key — fire encoded payload via RemoteEvent:FireServer
+        local code = rawget(net, "_code")
+        local key  = rawget(net, "_key")
+        if type(code)=="string" and type(key)=="table" and #key>=5 then
+            local remote = AK2_getRemote()
+            if remote then
+                local hs = game:GetService("HttpService")
+                local args = {...}
+                local payload = {code}
+                for _, a in ipairs(args) do payload[#payload+1] = a end
+                local ok2, raw = pcall(function() return hs:JSONEncode(payload) end)
+                if ok2 and raw then
+                    local enc = AK2_netEncode(raw, key)
+                    pcall(function() remote:FireServer(enc) end)
+                    return
+                end
+            end
+        end
+        -- Direct path: net.FireServer handles encoding internally
+        local ok = pcall(net.FireServer, net, ...)
+        if not ok then AK2._net = nil end
     end
 
     table.insert(Combat.connections, AimRunService.Heartbeat:Connect(function()
@@ -3948,6 +4074,8 @@ do
         local registry = svc and svc.Replicator and svc.Replicator.Actors
         if not registry then return end
         local now = tick(); local count = 0
+        local myActor = svc and svc.Replicator and svc.Replicator.LocalActor
+        local myPos = myActor and typeof(myActor.Position)=="Vector3" and myActor.Position
         for uid, a in pairs(registry) do
             if count >= AK2.maxPerCycle then break end
             if not Combat.IsAlive(a) then continue end
@@ -3961,6 +4089,7 @@ do
             if (now - (AK2._lastFire[uid] or 0)) < AK2.cooldown then continue end
             local pos = a.Position
             if typeof(pos) ~= "Vector3" then continue end
+            if myPos and (pos - myPos).Magnitude > AK2.range then continue end
             AK2._lastFire[uid] = now
             local hitPos = { pos.X, pos.Y + AK2.headYOffset, pos.Z }
             local slashArg = math.random(1, 3)
@@ -3996,6 +4125,13 @@ do
     ak2l:AddSlider({Text="Head Y Offset",Flag="ak2_head_y_offset",
         Min=0.5,Max=2.5,Default=1.5,Rounding=0.05,Suffix=" st",
         Callback=function(v) AK2.headYOffset=math.clamp(v,0.5,2.5) end})
+    ak2l:AddSlider({Text="Range",Flag="ak2_range",
+        Min=5,Max=150,Default=30,Rounding=1,Suffix=" st",
+        Callback=function(v) AK2.range=math.clamp(v,5,150) end})
+    ak2l:AddButton({Text="Rescan Net",Callback=function()
+        AK2._net=nil; AK2._remote=nil; AK2._netRetry=0
+        task.spawn(function() AK2_findNet(); AK2_getRemote() end)
+    end})
 
     local vp=VehiclePage
     local vl=vp:AddSection({Title="Driving",Side="Left"});local vr=vp:AddSection({Title="Flight",Side="Right"})
@@ -5053,35 +5189,6 @@ end
 
 end
 
--- ── SPINBOT + THIRD PERSON (merged into Movement page) ───────────
-do
-    -- Spinbot — right side of the existing Movement page
-    local SpinSec=movementPages[1]:AddSection({Title="Spinbot",Side="Right"})
-    local spinEnabled,spinSpeed=false,5
-    SpinSec:AddToggle({Text="Enable Spinbot",Flag="spinbot_enabled",Default=false,
-        Callback=function(v)
-            spinEnabled=v
-            AimRunService:UnbindFromRenderStep("ERISKOI_Spinbot")
-            if spinEnabled then
-                AimRunService:BindToRenderStep("ERISKOI_Spinbot",2000,function(dt)
-                    local char=AimLocalPlayer.Character
-                    local hrp=char and char:FindFirstChild("HumanoidRootPart")
-                    if hrp then
-                        hrp.CFrame=hrp.CFrame*CFrame.Angles(0,math.rad(spinSpeed*dt*60),0)
-                    end
-                end)
-            end
-        end})
-    SpinSec:AddSlider({Text="Spin Speed",Flag="spinbot_speed",Min=1,Max=20,Default=5,Rounding=1,Suffix="",
-        Callback=function(v) spinSpeed=v end})
-    SpinSec:AddToggle({Text="Spinbot Key",Flag="spinbot_key_toggle",Default=false,Callback=function() end})
-    SpinSec:AddKeyPicker({Text="Spinbot",Flag="spinbot_key",Default="None",Mode="Toggle",Callback=function() end})
-    local prevDestroySpinbot=Combat.Destroy
-    Combat.Destroy=function()
-        AimRunService:UnbindFromRenderStep("ERISKOI_Spinbot")
-        prevDestroySpinbot()
-    end
-end
 do
     -- Third Person Unlock — right side of the existing Movement page
     local CharSec=movementPages[1]:AddSection({Title="Character",Side="Right"})
