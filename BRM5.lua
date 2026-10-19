@@ -2958,6 +2958,9 @@ local function legacyPage(tab, pages, name)
             })
             return Options[data.Flag]
         end
+        function section:AddButton(data)
+            return group:AddButton(data.Text or data.Name or "Button", data.Callback or function() end)
+        end
         return section
     end
     return page
