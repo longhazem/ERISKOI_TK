@@ -4145,6 +4145,162 @@ do
         task.spawn(function() AK2_findNet(); AK2_getRemote() end)
     end})
 
+    -- ═══════════════════════════════════════════════════════════════════════════
+    -- COMBAT MODS (Auto-Heal + Nade AK) — discovered from MTC dump
+    -- Network path: same net object as AK2 → AK2_fire(net, "UseMedical", ...)
+    -- ═══════════════════════════════════════════════════════════════════════════
+    local CombatPage = legacyPage(Tabs.Mods, modPages, 'Combat Mods')
+    local cml = CombatPage:AddSection({Title="Auto Heal",Side="Left"})
+    local cmr = CombatPage:AddSection({Title="Nade Aura Kill",Side="Right"})
+
+    -- ── Auto-Heal config ─────────────────────────────────────────────────────
+    local HEAL = {
+        enabled    = false,
+        threshold  = 80,   -- heal when HP% drops below this
+        mode       = "Bandage", -- "Bandage" | "Vitamins" | "Dressing"
+        _lastHeal  = 0,
+        _interval  = 2.0,  -- minimum seconds between heals
+    }
+    Combat.Heal = HEAL
+
+    -- Heal trigger: fires on the same net channel as AK2
+    -- UseMedical(type, userId) — nil userId = self, Player.UserId = heal teammate
+    -- Bandage:  +10 HP instantly (or +25 with Dressing combo)
+    -- Vitamins: +100 HP over 5s
+    -- Dressing: +5 HP, intended as a pre-bandage combo
+    RunService.Heartbeat:Connect(function()
+        if not HEAL.enabled then return end
+        local now = tick()
+        if (now - HEAL._lastHeal) < HEAL._interval then return end
+        local c = Combat.Service()
+        if not c then return end
+        local me = c.Replicator and c.Replicator.LocalActor
+        if not me then return end
+        -- Health is stored as 0-1 binding on LocalActor; fallback to humanoid
+        local hp, maxHp = 100, 100
+        pcall(function()
+            local char = game.Players.LocalPlayer.Character
+            local hum  = char and char:FindFirstChildOfClass("Humanoid")
+            if hum then hp = hum.Health; maxHp = hum.MaxHealth end
+        end)
+        local pct = maxHp > 0 and (hp / maxHp * 100) or 100
+        if pct >= HEAL.threshold then return end
+        local net = AK2_findNet()
+        if not net then return end
+        HEAL._lastHeal = now
+        AK2_fire(net, "UseMedical", HEAL.mode, nil)  -- nil = self
+    end)
+
+    cml:AddToggle({Text="Auto Heal",Flag="autoheal_enabled",Default=false,
+        Callback=function(v) HEAL.enabled=v end})
+    cml:AddSlider({Text="HP Threshold %",Flag="autoheal_threshold",
+        Min=10,Max=95,Default=80,Rounding=5,Suffix="%",
+        Callback=function(v) HEAL.threshold=v end})
+    cml:AddSlider({Text="Interval (s)",Flag="autoheal_interval",
+        Min=0.5,Max=10,Default=2,Rounding=0.5,Suffix=" s",
+        Callback=function(v) HEAL._interval=v end})
+    cml:AddDropdown({Text="Heal Item",Flag="autoheal_mode",
+        Options={"Bandage","Vitamins","Dressing"},Default="Bandage",
+        Callback=function(v) HEAL.mode=v end})
+    cml:AddButton({Text="Heal Now",Callback=function()
+        local net = AK2_findNet(); if not net then return end
+        AK2_fire(net, "UseMedical", HEAL.mode, nil)
+    end})
+
+    -- ── Nade Aura Kill config ────────────────────────────────────────────────
+    -- Fires InventoryAction "PullPin" (true=high/long-fuse, false=low/short)
+    -- then InventoryAction "Throw" with a minimal trajectory path table toward target
+    -- Server uses path for grenade spawn origin/velocity; explosion radius handles kill
+    local NAK = {
+        enabled    = false,
+        range      = 15,   -- studs
+        highThrow  = false, -- true = long fuse arc, false = short fuse lob
+        cooldown   = 1.5,   -- seconds between throws per target
+        maxPerCycle= 2,
+        killPlayer = true,
+        killAI     = true,
+        killZombie = false,
+        _lastFire  = {},
+    }
+    Combat.NadeAK = NAK
+
+    local function NAK_buildPath(origin, target)
+        -- Minimal trajectory table: array of Vector3-as-tables matching server's expected format
+        -- Server reads path[1] as spawn origin, path[n] as landing point
+        -- We give 3 waypoints: origin → midpoint (arced) → target
+        local mid = Vector3.new(
+            (origin.X + target.X) / 2,
+            math.max(origin.Y, target.Y) + (NAK.highThrow and 8 or 4),
+            (origin.Z + target.Z) / 2
+        )
+        return {
+            {origin.X, origin.Y + 1.5, origin.Z},
+            {mid.X, mid.Y, mid.Z},
+            {target.X, target.Y, target.Z},
+        }
+    end
+
+    RunService.Heartbeat:Connect(function()
+        if not NAK.enabled then return end
+        local net = AK2_findNet(); if not net then return end
+        local now = tick()
+        local c = Combat.Service(); if not c then return end
+        local me = c.Replicator and c.Replicator.LocalActor
+        local myPos = me and me.Position
+        if not myPos then return end
+        local registry = c.Replicator and c.Replicator.Actors or {}
+        local count = 0
+        for uid, actor in pairs(registry) do
+            if count >= NAK.maxPerCycle then break end
+            if actor == me then continue end
+            local kind = actor.TargetGroup
+            local allow = false
+            if kind == 1 and NAK.killPlayer  then allow = true end  -- Hostile=1
+            if kind == 0 and NAK.killAI      then allow = true end  -- Friendly bots? use NAK.killAI
+            if kind == 2 and NAK.killZombie  then allow = true end  -- Zombie=2
+            -- fallback: check by Owner
+            pcall(function()
+                if not allow and actor.Owner and not actor.IsLocalPlayer then
+                    if NAK.killPlayer then allow = true end
+                end
+            end)
+            if not allow then continue end
+            if (now - (NAK._lastFire[uid] or 0)) < NAK.cooldown then continue end
+            local pos = actor.Position or actor.ServerPosition
+            if not pos then continue end
+            if (pos - myPos).Magnitude > NAK.range then continue end
+            NAK._lastFire[uid] = now
+            count = count + 1
+            local path = NAK_buildPath(myPos, pos)
+            AK2_fire(net, "InventoryAction", "PullPin", not NAK.highThrow)
+            task.delay(0.15, function()
+                if not NAK.enabled then return end
+                local n2 = AK2_findNet(); if not n2 then return end
+                AK2_fire(n2, "InventoryAction", "Throw", path)
+            end)
+        end
+    end)
+
+    cmr:AddToggle({Text="Nade AK Enabled",Flag="nak_enabled",Default=false,
+        Callback=function(v) NAK.enabled=v end})
+    cmr:AddToggle({Text="Kill Players",Flag="nak_player",Default=true,
+        Callback=function(v) NAK.killPlayer=v end})
+    cmr:AddToggle({Text="Kill AI",Flag="nak_ai",Default=true,
+        Callback=function(v) NAK.killAI=v end})
+    cmr:AddToggle({Text="Kill Zombies",Flag="nak_zombie",Default=false,
+        Callback=function(v) NAK.killZombie=v end})
+    cmr:AddToggle({Text="High Throw (Long Fuse)",Flag="nak_highthrow",Default=false,
+        Callback=function(v) NAK.highThrow=v end})
+    cmr:AddSlider({Text="Range",Flag="nak_range",
+        Min=5,Max=30,Default=15,Rounding=1,Suffix=" studs",
+        Callback=function(v) NAK.range=v end})
+    cmr:AddSlider({Text="Cooldown",Flag="nak_cooldown",
+        Min=0.5,Max=5,Default=1.5,Rounding=0.5,Suffix=" s",
+        Callback=function(v) NAK.cooldown=v end})
+    cmr:AddSlider({Text="Max Per Cycle",Flag="nak_maxcycle",
+        Min=1,Max=5,Default=2,Rounding=1,
+        Callback=function(v) NAK.maxPerCycle=math.clamp(v,1,5) end})
+
     local vp=VehiclePage
     local vl=vp:AddSection({Title="Driving",Side="Left"});local vr=vp:AddSection({Title="Flight",Side="Right"})
     toggle(vl,"Speed Mod",V,"Speed","vehicle_speed")
