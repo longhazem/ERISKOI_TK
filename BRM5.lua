@@ -3942,7 +3942,8 @@ do
 
     -- ── Aura Kill V2 ──────────────────────────────────────────────────────────
     -- Pipeline: InventoryAction "Slash" → InventoryAction "Impact"
-    -- Server-trusted hit registration — zero proximity required
+    -- Timing + reach matched to MTC game_tree dump (MeleeInventory.lua / Melee.lua) —
+    -- server most likely gates Impact on realistic melee distance + Slash→Impact delay.
     local AK2: {[string]: any} = {
         enabled     = false,
         killAI      = true,
@@ -3952,7 +3953,10 @@ do
         maxPerCycle = 12,
         cooldown    = 0.15,
         headYOffset = 1.5,
-        range       = 30,
+        range       = 8,        -- MTC Melee.lua: max real Reach = 7 (Tomahawk). Server likely
+                                 -- validates Impact distance against this — stay close to it.
+        impactDelay = 0.3,      -- MTC Melee.lua: real Slash→Impact gap is 0.25-0.3s (MeleeInventory._use).
+                                 -- Firing both same-frame (old behavior) looks server-impossible.
         _lastFire   = {},
         _net        = nil,
         _remote     = nil,
@@ -4097,7 +4101,9 @@ do
             local hitPos = { pos.X, pos.Y + AK2.headYOffset, pos.Z }
             local slashArg = math.random(1, 3)
             AK2_fire(net, "InventoryAction", "Slash", slashArg)
-            task.delay(0, function()
+            -- MTC MeleeInventory._use: real client waits `_delay` (0.25-0.3s) after Slash
+            -- before raycasting + firing Impact. Matching that timing, not same-frame.
+            task.delay(AK2.impactDelay, function()
                 if not AK2.enabled then return end
                 local n = AK2_findNet(); if not n then return end
                 AK2_fire(n, "InventoryAction", "Impact", hitPos, uid, AK2.hitPart)
@@ -4129,8 +4135,11 @@ do
         Min=0.5,Max=2.5,Default=1.5,Rounding=0.05,Suffix=" st",
         Callback=function(v) AK2.headYOffset=math.clamp(v,0.5,2.5) end})
     ak2l:AddSlider({Text="Range",Flag="ak2_range",
-        Min=5,Max=150,Default=30,Rounding=1,Suffix=" st",
-        Callback=function(v) AK2.range=math.clamp(v,5,150) end})
+        Min=5,Max=30,Default=8,Rounding=1,Suffix=" st",
+        Callback=function(v) AK2.range=math.clamp(v,5,30) end})
+    ak2l:AddSlider({Text="Impact Delay",Flag="ak2_impact_delay",
+        Min=0,Max=1,Default=0.3,Rounding=0.05,Suffix=" s",
+        Callback=function(v) AK2.impactDelay=math.clamp(v,0,1) end})
     ak2l:AddButton({Text="Rescan Net",Callback=function()
         AK2._net=nil; AK2._remote=nil; AK2._netRetry=0
         task.spawn(function() AK2_findNet(); AK2_getRemote() end)
