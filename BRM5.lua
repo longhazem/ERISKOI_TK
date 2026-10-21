@@ -4157,6 +4157,7 @@ do
         killZombie   = true,
         killPlayer   = false,
         hitPart      = "Head",
+        headYOffset  = 1.5,
         maxPerCycle  = 4,
         cooldown     = 0.55,
         range        = 7.5,
@@ -4180,8 +4181,8 @@ do
         if ak3DecoyPos and AK3.decoyEnabled then return ak3DecoyPos end
         local rep = ak3_rep(); local a = rep and rep.LocalActor
         if a then
-            local ok, cf = pcall(function() return a.CFrame.Position end)
-            if ok and typeof(cf) == "Vector3" then return cf end
+            local ok, pos = pcall(function() return a.Position end)
+            if ok and typeof(pos) == "Vector3" then return pos end
         end
         local char = Players.LocalPlayer.Character
         local root = char and (char:FindFirstChild("HumanoidRootPart") or char.PrimaryPart)
@@ -4250,13 +4251,11 @@ do
             if kind=="Players" and AK3.killPlayer then allow=true end
             if not allow then continue end
             if (now-(AK3._lastFire[uid] or 0)) < AK3.cooldown then continue end
-            local char = a.Character
-            if typeof(char) ~= "Instance" then continue end
-            local part = char:FindFirstChild(AK3.hitPart)
-            if not part then continue end
-            local dist = (part.Position - from).Magnitude
-            if dist > AK3.range - AK3.rangeMargin then continue end
-            table.insert(candidates, {uid=tostring(uid), part=part, dist=dist})
+            local pos = a.Position
+            if typeof(pos) ~= "Vector3" then continue end
+            local dist = (pos - from).Magnitude
+            if dist > AK3.range then continue end
+            table.insert(candidates, {uid=uid, pos=pos, dist=dist})
         end
         table.sort(candidates, function(x, y) return x.dist < y.dist end)
 
@@ -4265,20 +4264,12 @@ do
             if fired >= AK3.maxPerCycle then break end
             AK3._lastFire[entry.uid] = now
             AK2_fire(net, "InventoryAction", "Slash", math.random(1, 3))
-            local uid2, part2 = entry.uid, entry.part
+            local uid2 = entry.uid
+            local hitPos = {entry.pos.X, entry.pos.Y + AK3.headYOffset, entry.pos.Z}
             task.delay(AK3.impactDelay, function()
                 if not AK3.enabled then return end
                 local n2 = AK2_findNet(); if not n2 then return end
-                -- RINGRING: ServerPosition for accurate impact vector
-                local sp = ak3_serverPos()
-                local f2 = sp or ak3_reportedPos()
-                if not f2 then return end
-                if not part2 or not part2.Parent then return end
-                if (part2.Position - f2).Magnitude > AK3.range - AK3.rangeMargin + 0.5 then return end
-                local dir = f2 - part2.Position
-                local off = dir.Magnitude > 0 and dir.Unit*(part2.Size.X/2) or Vector3.zero
-                local hit = part2.Position + off
-                AK2_fire(n2, "InventoryAction", "Impact", {hit.X, hit.Y, hit.Z}, uid2, AK3.hitPart)
+                AK2_fire(n2, "InventoryAction", "Impact", hitPos, uid2, AK3.hitPart)
             end)
             fired += 1
         end
