@@ -3487,6 +3487,7 @@ local GunPage = legacyPage(Tabs.Mods, modPages, 'Gun Mods')
 local TurretPage = legacyPage(Tabs.Mods, modPages, 'Turret Mods')
 local VehiclePage = legacyPage(Tabs.Mods, modPages, 'Vehicle Mods')
 local MeleePage = legacyPage(Tabs.Mods, modPages, 'Melee Mods')
+local AKPage = legacyPage(Tabs.Mods, modPages, 'Aura Kill V3')
 local GunVisualsPage = GunPage
 local Gun: {[string]: any}={NoRecoil=false,InstantADS=false,NoSway=false,NoSpread=false,SpreadReduction=100,
     UnlockModes=false,AutoReload=false,ForceHeadshot=false,active=true,originals={},hooks={},nextResolve=0,
@@ -4289,33 +4290,37 @@ do
         ak3_pushPos(ak3DecoyPos)
     end))
 
-    local ak3r = mp:AddSection({Title="Aura Kill V3",Side="Right"})
-    ak3r:AddToggle({Text="Enable",Flag="ak3_enabled",Default=false,
+    -- AK3 lives on its own subtab: Mods → "Aura Kill V3"
+    local ak3l = AKPage:AddSection({Title="Aura Kill V3",Side="Left"})
+    local ak3r = AKPage:AddSection({Title="Decoy & Net",Side="Right"})
+
+    ak3l:AddToggle({Text="Enable",Flag="ak3_enabled",Default=false,
         Callback=function(v) AK3.enabled=v end})
-    ak3r:AddToggle({Text="Kill NPCs",Flag="ak3_kill_ai",Default=true,
+    ak3l:AddToggle({Text="Kill NPCs",Flag="ak3_kill_ai",Default=true,
         Callback=function(v) AK3.killAI=v end})
-    ak3r:AddToggle({Text="Kill Zombies",Flag="ak3_kill_zombie",Default=true,
+    ak3l:AddToggle({Text="Kill Zombies",Flag="ak3_kill_zombie",Default=true,
         Callback=function(v) AK3.killZombie=v end})
-    ak3r:AddToggle({Text="Kill Players",Flag="ak3_kill_player",Default=false,
+    ak3l:AddToggle({Text="Kill Players",Flag="ak3_kill_player",Default=false,
         Callback=function(v) AK3.killPlayer=v end})
-    ak3r:AddToggle({Text="Decoy Position",Flag="ak3_decoy",Default=true,
-        Callback=function(v) AK3.decoyEnabled=v; if not v then ak3_tearDecoy() end end})
-    ak3r:AddDropdown({Text="Hit Part",Flag="ak3_hitpart",
+    ak3l:AddDropdown({Text="Hit Part",Flag="ak3_hitpart",
         Options={"Head","UpperTorso","LowerTorso","LeftUpperArm","RightUpperArm","LeftUpperLeg","RightUpperLeg"},
         Default="Head",
         Callback=function(v) AK3.hitPart=v end})
-    ak3r:AddSlider({Text="Max Targets/Tick",Flag="ak3_max_targets",
+    ak3l:AddSlider({Text="Max Targets/Tick",Flag="ak3_max_targets",
         Min=1,Max=20,Default=4,Rounding=1,Suffix="",
         Callback=function(v) AK3.maxPerCycle=math.clamp(v,1,20) end})
-    ak3r:AddSlider({Text="Hit Cooldown",Flag="ak3_cooldown",
+    ak3l:AddSlider({Text="Hit Cooldown",Flag="ak3_cooldown",
         Min=0.05,Max=2.0,Default=0.55,Rounding=0.05,Suffix=" s",
         Callback=function(v) AK3.cooldown=math.clamp(v,0.05,2.0) end})
-    ak3r:AddSlider({Text="Range",Flag="ak3_range",
+    ak3l:AddSlider({Text="Range",Flag="ak3_range",
         Min=3,Max=20,Default=7.5,Rounding=0.5,Suffix=" st",
         Callback=function(v) AK3.range=math.clamp(v,3,20) end})
-    ak3r:AddSlider({Text="Impact Delay",Flag="ak3_impact_delay",
+    ak3l:AddSlider({Text="Impact Delay",Flag="ak3_impact_delay",
         Min=0,Max=1,Default=0.28,Rounding=0.02,Suffix=" s",
         Callback=function(v) AK3.impactDelay=math.clamp(v,0,1) end})
+
+    ak3r:AddToggle({Text="Decoy Position",Flag="ak3_decoy",Default=true,
+        Callback=function(v) AK3.decoyEnabled=v; if not v then ak3_tearDecoy() end end})
     ak3r:AddSlider({Text="Decoy Offset",Flag="ak3_decoy_offset",
         Min=0,Max=10,Default=3,Rounding=0.5,Suffix=" st",
         Callback=function(v) AK3.decoyOffset=math.clamp(v,0,10) end})
@@ -4333,7 +4338,7 @@ do
         if r then ak3DecoyPos = r.Position + Vector3.new(0, AK3.decoyOffset, 0) end
     end})
     ak3r:AddButton({Text="Recall Decoy",Callback=function() ak3_tearDecoy() end})
-    ak3r:AddButton({Text="Rescan Net (shared)",Callback=function()
+    ak3r:AddButton({Text="Rescan Net",Callback=function()
         AK2._net=nil; AK2._remote=nil; AK2._netRetry=0
         task.spawn(function() AK2_findNet(); AK2_getRemote() end)
     end})
