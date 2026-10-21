@@ -4145,6 +4145,198 @@ do
         task.spawn(function() AK2_findNet(); AK2_getRemote() end)
     end})
 
+    -- ── Aura Kill V3 ──────────────────────────────────────────────────────────
+    -- RINGRING position layer: ForceNextPosition + SimulatePosition +
+    -- FireNextPosition + ServerPosition (impact vec) + CheckCharacterControllable
+    -- Per-UID cooldown, multi-target sorted by distance.
+    -- Reuses AK2_findNet / AK2_fire already defined above.
+    local AK3: {[string]: any} = {
+        enabled      = false,
+        killAI       = true,
+        killZombie   = true,
+        killPlayer   = false,
+        hitPart      = "Head",
+        maxPerCycle  = 4,
+        cooldown     = 0.55,
+        range        = 7.5,
+        rangeMargin  = 0.3,
+        impactDelay  = 0.28,
+        decoyEnabled = true,
+        decoyOffset  = 3,
+        _lastFire    = {},
+    }
+    Combat.AK3 = AK3
+
+    local ak3DecoyConn = nil
+    local ak3DecoyPos: Vector3? = nil
+
+    local function ak3_rep()
+        local svc = Combat.Service()
+        return svc and svc.Replicator
+    end
+
+    local function ak3_reportedPos()
+        if ak3DecoyPos and AK3.decoyEnabled then return ak3DecoyPos end
+        local rep = ak3_rep(); local a = rep and rep.LocalActor
+        if a then
+            local ok, cf = pcall(function() return a.CFrame.Position end)
+            if ok and typeof(cf) == "Vector3" then return cf end
+        end
+        local char = Players.LocalPlayer.Character
+        local root = char and (char:FindFirstChild("HumanoidRootPart") or char.PrimaryPart)
+        if root then return root.Position end
+        return nil
+    end
+
+    local function ak3_serverPos()
+        local rep = ak3_rep(); local a = rep and rep.LocalActor
+        if not a then return nil end
+        local ok, sp = pcall(function() return a.ServerPosition end)
+        if ok and typeof(sp) == "Vector3" then return sp end
+        return nil
+    end
+
+    -- RINGRING: CheckCharacterControllable — guard before each fire tick
+    local function ak3_isControllable()
+        local rep = ak3_rep(); if not rep then return true end
+        local a = rep.LocalActor; if not a then return false end
+        local ok, v = pcall(function() return a:CheckCharacterControllable() end)
+        if ok then return v ~= false end
+        local ok2, v2 = pcall(function() return a.CharacterControllable end)
+        if ok2 and v2 ~= nil then return v2 ~= false end
+        return true
+    end
+
+    -- RINGRING: three position methods layered together
+    local function ak3_pushPos(pos)
+        local rep = ak3_rep(); local a = rep and rep.LocalActor
+        if not a then return end
+        pcall(function() a.ForceNextPosition = pos end)
+        pcall(function()
+            if type(a.SimulatePosition)=="function" then a:SimulatePosition(pos)
+            elseif type(rep.SimulatePosition)=="function" then rep:SimulatePosition(pos) end
+        end)
+        pcall(function()
+            if type(a.FireNextPosition)=="function" then a:FireNextPosition(pos)
+            elseif type(rep.FireNextPosition)=="function" then rep:FireNextPosition(pos) end
+        end)
+    end
+
+    local function ak3_tearDecoy()
+        if ak3DecoyConn then ak3DecoyConn:Disconnect(); ak3DecoyConn = nil end
+        ak3DecoyPos = nil
+        local rep = ak3_rep(); local a = rep and rep.LocalActor
+        if a then pcall(function() a.ForceNextPosition = nil end) end
+    end
+
+    -- Main aura loop
+    table.insert(Combat.connections, AimRunService.Heartbeat:Connect(function()
+        if not AK3.enabled then return end
+        if not ak3_isControllable() then return end
+        local net = AK2_findNet(); if not net then return end
+        local rep = ak3_rep(); if not rep then return end
+        local registry = rep.Actors; if not registry then return end
+        local from = ak3_reportedPos(); if not from then return end
+        local now = os.clock()
+
+        local candidates = {}
+        for uid, a in pairs(registry) do
+            if not Combat.IsAlive(a) then continue end
+            local kind = Combat.Kind(a); if not kind then continue end
+            local allow = false
+            if kind=="Zombies" and AK3.killZombie then allow=true end
+            if kind=="NPCs"    and AK3.killAI     then allow=true end
+            if kind=="Players" and AK3.killPlayer then allow=true end
+            if not allow then continue end
+            if (now-(AK3._lastFire[uid] or 0)) < AK3.cooldown then continue end
+            local char = a.Character
+            if typeof(char) ~= "Instance" then continue end
+            local part = char:FindFirstChild(AK3.hitPart)
+            if not part then continue end
+            local dist = (part.Position - from).Magnitude
+            if dist > AK3.range - AK3.rangeMargin then continue end
+            table.insert(candidates, {uid=tostring(uid), part=part, dist=dist})
+        end
+        table.sort(candidates, function(x, y) return x.dist < y.dist end)
+
+        local fired = 0
+        for _, entry in ipairs(candidates) do
+            if fired >= AK3.maxPerCycle then break end
+            AK3._lastFire[entry.uid] = now
+            AK2_fire(net, "InventoryAction", "Slash", math.random(1, 3))
+            local uid2, part2 = entry.uid, entry.part
+            task.delay(AK3.impactDelay, function()
+                if not AK3.enabled then return end
+                local n2 = AK2_findNet(); if not n2 then return end
+                -- RINGRING: ServerPosition for accurate impact vector
+                local sp = ak3_serverPos()
+                local f2 = sp or ak3_reportedPos()
+                if not f2 then return end
+                if not part2 or not part2.Parent then return end
+                if (part2.Position - f2).Magnitude > AK3.range - AK3.rangeMargin + 0.5 then return end
+                local dir = f2 - part2.Position
+                local off = dir.Magnitude > 0 and dir.Unit*(part2.Size.X/2) or Vector3.zero
+                local hit = part2.Position + off
+                AK2_fire(n2, "InventoryAction", "Impact", {hit.X, hit.Y, hit.Z}, uid2, AK3.hitPart)
+            end)
+            fired += 1
+        end
+    end))
+
+    -- Decoy heartbeat — push position every frame
+    table.insert(Combat.connections, AimRunService.Heartbeat:Connect(function()
+        if not AK3.enabled or not AK3.decoyEnabled or not ak3DecoyPos then return end
+        ak3_pushPos(ak3DecoyPos)
+    end))
+
+    local ak3r = mp:AddSection({Title="Aura Kill V3",Side="Right"})
+    ak3r:AddToggle({Text="Enable",Flag="ak3_enabled",Default=false,
+        Callback=function(v) AK3.enabled=v end})
+    ak3r:AddToggle({Text="Kill NPCs",Flag="ak3_kill_ai",Default=true,
+        Callback=function(v) AK3.killAI=v end})
+    ak3r:AddToggle({Text="Kill Zombies",Flag="ak3_kill_zombie",Default=true,
+        Callback=function(v) AK3.killZombie=v end})
+    ak3r:AddToggle({Text="Kill Players",Flag="ak3_kill_player",Default=false,
+        Callback=function(v) AK3.killPlayer=v end})
+    ak3r:AddToggle({Text="Decoy Position",Flag="ak3_decoy",Default=true,
+        Callback=function(v) AK3.decoyEnabled=v; if not v then ak3_tearDecoy() end end})
+    ak3r:AddDropdown({Text="Hit Part",Flag="ak3_hitpart",
+        Options={"Head","UpperTorso","LowerTorso","LeftUpperArm","RightUpperArm","LeftUpperLeg","RightUpperLeg"},
+        Default="Head",
+        Callback=function(v) AK3.hitPart=v end})
+    ak3r:AddSlider({Text="Max Targets/Tick",Flag="ak3_max_targets",
+        Min=1,Max=20,Default=4,Rounding=1,Suffix="",
+        Callback=function(v) AK3.maxPerCycle=math.clamp(v,1,20) end})
+    ak3r:AddSlider({Text="Hit Cooldown",Flag="ak3_cooldown",
+        Min=0.05,Max=2.0,Default=0.55,Rounding=0.05,Suffix=" s",
+        Callback=function(v) AK3.cooldown=math.clamp(v,0.05,2.0) end})
+    ak3r:AddSlider({Text="Range",Flag="ak3_range",
+        Min=3,Max=20,Default=7.5,Rounding=0.5,Suffix=" st",
+        Callback=function(v) AK3.range=math.clamp(v,3,20) end})
+    ak3r:AddSlider({Text="Impact Delay",Flag="ak3_impact_delay",
+        Min=0,Max=1,Default=0.28,Rounding=0.02,Suffix=" s",
+        Callback=function(v) AK3.impactDelay=math.clamp(v,0,1) end})
+    ak3r:AddSlider({Text="Decoy Offset",Flag="ak3_decoy_offset",
+        Min=0,Max=10,Default=3,Rounding=0.5,Suffix=" st",
+        Callback=function(v) AK3.decoyOffset=math.clamp(v,0,10) end})
+    ak3r:AddButton({Text="Drop Decoy (Crosshair)",Callback=function()
+        if not AK3.decoyEnabled then return end
+        local cam = workspace.CurrentCamera
+        local vp = cam.ViewportSize
+        local ray = cam:ViewportPointToRay(vp.X/2, vp.Y/2)
+        local params = RaycastParams.new()
+        params.FilterType = Enum.RaycastFilterType.Exclude
+        local ign = {cam}
+        if Players.LocalPlayer.Character then table.insert(ign, Players.LocalPlayer.Character) end
+        params.FilterDescendantsInstances = ign
+        local r = workspace:Raycast(ray.Origin, ray.Direction*300, params)
+        if r then ak3DecoyPos = r.Position + Vector3.new(0, AK3.decoyOffset, 0) end
+    end})
+    ak3r:AddButton({Text="Recall Decoy",Callback=function() ak3_tearDecoy() end})
+    ak3r:AddButton({Text="Rescan Net (shared)",Callback=function()
+        AK2._net=nil; AK2._remote=nil; AK2._netRetry=0
+        task.spawn(function() AK2_findNet(); AK2_getRemote() end)
+    end})
 
     local vp=VehiclePage
     local vl=vp:AddSection({Title="Driving",Side="Left"});local vr=vp:AddSection({Title="Flight",Side="Right"})
