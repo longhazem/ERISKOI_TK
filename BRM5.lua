@@ -4160,7 +4160,7 @@ do
         headYOffset  = 1.5,
         maxPerCycle  = 4,
         cooldown     = 0.55,
-        range        = 7.5,
+        range        = 50,
         rangeMargin  = 0.3,
         impactDelay  = 0.28,
         decoyEnabled = true,
@@ -4263,12 +4263,18 @@ do
         for _, entry in ipairs(candidates) do
             if fired >= AK3.maxPerCycle then break end
             AK3._lastFire[entry.uid] = now
+            -- RINGRING: spoof position to target before Slash
+            local spawnPos = entry.pos + Vector3.new(0, 0.5, 0)
+            ak3_pushPos(spawnPos)
             AK2_fire(net, "InventoryAction", "Slash", math.random(1, 3))
             local uid2 = entry.uid
             local hitPos = {entry.pos.X, entry.pos.Y + AK3.headYOffset, entry.pos.Z}
+            local sp2 = spawnPos
             task.delay(AK3.impactDelay, function()
                 if not AK3.enabled then return end
                 local n2 = AK2_findNet(); if not n2 then return end
+                -- RINGRING: spoof position again for Impact validation
+                ak3_pushPos(sp2)
                 AK2_fire(n2, "InventoryAction", "Impact", hitPos, uid2, AK3.hitPart)
             end)
             fired += 1
@@ -4304,8 +4310,8 @@ do
         Min=0.05,Max=2.0,Default=0.55,Rounding=0.05,Suffix=" s",
         Callback=function(v) AK3.cooldown=math.clamp(v,0.05,2.0) end})
     ak3l:AddSlider({Text="Range",Flag="ak3_range",
-        Min=3,Max=20,Default=7.5,Rounding=0.5,Suffix=" st",
-        Callback=function(v) AK3.range=math.clamp(v,3,20) end})
+        Min=3,Max=100,Default=50,Rounding=1,Suffix=" st",
+        Callback=function(v) AK3.range=math.clamp(v,3,100) end})
     ak3l:AddSlider({Text="Impact Delay",Flag="ak3_impact_delay",
         Min=0,Max=1,Default=0.28,Rounding=0.02,Suffix=" s",
         Callback=function(v) AK3.impactDelay=math.clamp(v,0,1) end})
