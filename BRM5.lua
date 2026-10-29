@@ -3443,6 +3443,7 @@ do
             end
         end
     end)
+    Combat.Movement._miscSection = right
 end
 
 -- ── SPINBOT ──────────────────────────────────────────────────────
@@ -3516,14 +3517,14 @@ do
         end)
     end
 
-    right:AddToggle({Text="Enable Spinbot", Flag="spinbot_enabled", Default=false,
+    Combat.Movement._miscSection:AddToggle({Text="Enable Spinbot", Flag="spinbot_enabled", Default=false,
         Callback=function(v) spinEnabled=v; bindSpin() end})
-    right:AddSlider({Text="Spin Speed", Flag="spinbot_speed", Min=1, Max=100, Default=20, Rounding=1, Suffix="",
+    Combat.Movement._miscSection:AddSlider({Text="Spin Speed", Flag="spinbot_speed", Min=1, Max=100, Default=20, Rounding=1, Suffix="",
         Callback=function(v) spinSpeed=v end})
 
     -- Third Person Unlock
     local tpEnabled = false
-    right:AddToggle({Text="Third Person Unlock", Flag="thirdperson_enabled", Default=false,
+    Combat.Movement._miscSection:AddToggle({Text="Third Person Unlock", Flag="thirdperson_enabled", Default=false,
         Callback=function(v)
             tpEnabled=v
             if v then
