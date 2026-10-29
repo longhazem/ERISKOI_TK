@@ -139,7 +139,7 @@ local AimUIS = game:GetService("UserInputService")
 local AimLocalPlayer = AimPlayers.LocalPlayer
 local AimCamera = workspace.CurrentCamera
 local Silent = {
-    Enabled=false,Targets={NPCs=true,Players=true},HitPart="Head",Hitscan=false,TeamCheck=false,VisibleCheck=true,
+    Enabled=false,Targets={NPCs=true,Players=true},HitPart="Head",Hitscan=false,TeamCheck=false,VisibleCheck=true,GlassCheck=false,
     MaxDistance=1000,HitChance=100,StickyAim=false,FOVEnabled=true,ShowFOV=true,FOV=120,
     FOVColor=Color3.fromRGB(224,224,224),FillFOV=false,FOVFillColor=Color3.fromRGB(224,224,224),
     FOVFillTransparency=.4,GradientFOV=false,
@@ -148,12 +148,12 @@ local Silent = {
     AutoPrediction=true,BulletDropCompensation=true,
 }
 local TriggerBotSettings = {
-    Enabled=false,Targets={NPCs=true,Players=true},TeamCheck=false,VisibleCheck=true,
+    Enabled=false,Targets={NPCs=true,Players=true},TeamCheck=false,VisibleCheck=true,GlassCheck=false,
     MaxDistance=1000,ReactionTime=50,ShootTime=100,Magnetic=false,
 }
 local Rage = {
     Enabled=false,Targets={NPCs=true,Zombies=true,Players=true},HitPart="Head",
-    Hitscan=true,TeamCheck=true,VisibleCheck=true,FullCircle=true,
+    Hitscan=true,TeamCheck=true,VisibleCheck=true,GlassCheck=false,FullCircle=true,
     DistanceCheck=true,MaxDistance=1000,FOVEnabled=false,AutoPrediction=true,BulletDropCompensation=true,
 }
 local Combat: {[string]: any} = {
@@ -310,24 +310,43 @@ combatRayParams.FilterType=Enum.RaycastFilterType.Exclude
 combatRayParams.IgnoreWater=false
 -- Match the collision group used by this game's projectile raycasts.
 pcall(function() combatRayParams.CollisionGroup="9" end)
-function Combat.Visible(actor,point,camera)
+function Combat.Visible(actor,point,camera,glassCheck)
     local c=Combat.Service();local me=c and c.Replicator and c.Replicator.LocalActor
     local excluded={camera}
     if me and me.Character then excluded[#excluded+1]=me.Character end
     combatRayParams.FilterDescendantsInstances=excluded
-    local hit=workspace:Raycast(camera.CFrame.Position,point-camera.CFrame.Position,combatRayParams)
-    if not hit then return true end
-    if actor.Character and hit.Instance:IsDescendantOf(actor.Character) then return true end
-    -- Render rigs and collision bodies may be separate. Use the same actor
-    -- identity mapping that the game's bullet-impact handler uses.
     local replicator=c and c.Replicator
     local registry=replicator and replicator.Actors
-    if not registry or registry[actor.UID]~=actor then return false end
-    local uid=hit.Instance:GetAttribute("ActorUID")
-    if uid==actor.UID then return true end
-    if type(replicator.GetFromBodyPart)=="function" then
-        local ok,resolvedUID=pcall(replicator.GetFromBodyPart,replicator,hit.Instance)
-        if ok and resolvedUID==actor.UID then return true end
+    local origin=camera.CFrame.Position
+    local maxPasses=glassCheck and 8 or 1
+    for _=1,maxPasses do
+        local hit=workspace:Raycast(origin,point-origin,combatRayParams)
+        if not hit then return true end
+        if actor.Character and hit.Instance:IsDescendantOf(actor.Character) then return true end
+        -- Render rigs and collision bodies may be separate. Use the same actor
+        -- identity mapping that the game's bullet-impact handler uses.
+        if registry and registry[actor.UID]==actor then
+            local uid=hit.Instance:GetAttribute("ActorUID")
+            if uid==actor.UID then return true end
+            if type(replicator.GetFromBodyPart)=="function" then
+                local ok,resolvedUID=pcall(replicator.GetFromBodyPart,replicator,hit.Instance)
+                if ok and resolvedUID==actor.UID then return true end
+            end
+        end
+        -- Glass pass-through: tiếp tục raycast qua glass parts
+        if glassCheck then
+            local inst=hit.Instance
+            local ok1,t1=pcall(function() return inst:HasTag("Glass") end)
+            local ok2,t2=pcall(function() return inst:HasTag("Prefab") and inst:GetAttribute("Prefab")=="Glass" end)
+            if (ok1 and t1) or (ok2 and t2) then
+                local dir=(point-origin)
+                origin=hit.Position+dir.Unit*0.05
+            else
+                return false
+            end
+        else
+            return false
+        end
     end
     return false
 end
@@ -381,7 +400,7 @@ function Combat.FindTarget(settings,camera,mouse,sticky)
             if not settings.FullCircle and not on then return nil end
             local d=settings.FullCircle and (point-origin).Magnitude or (Vector2.new(sp.X,sp.Y)-mouse).Magnitude
             if settings.FOVEnabled and d>settings.FOV then return nil end
-            if (settings.VisibleCheck or requireVisible) and not Combat.Visible(a,point,camera) then return nil end
+            if (settings.VisibleCheck or requireVisible) and not Combat.Visible(a,point,camera,settings.GlassCheck) then return nil end
             return {actor=a,part=part,position=point,distance=d}
         end
         local preferred=Combat.PickPart(a,settings,camera,mouse)
@@ -426,7 +445,7 @@ function Combat.TriggerTarget(settings,camera,mouse)
         local selected=Combat.target
         if Silent.Enabled and Combat.silentActive and selected and Combat.Allowed(selected.actor,settings)
             and (selected.actor.Position-Combat.Origin(camera)).Magnitude<=settings.MaxDistance
-            and (not settings.VisibleCheck or Combat.Visible(selected.actor,selected.position,camera)) then return selected.actor end
+            and (not settings.VisibleCheck or Combat.Visible(selected.actor,selected.position,camera,settings.GlassCheck)) then return selected.actor end
         return nil
     end
     Combat.Sync()
@@ -466,7 +485,7 @@ function Combat.TriggerTarget(settings,camera,mouse)
         end
     end
     if not closest or not Combat.Allowed(closest,settings) then return nil end
-    if settings.VisibleCheck and not Combat.Visible(closest,ray.Origin+ray.Direction*nearest,camera) then return nil end
+    if settings.VisibleCheck and not Combat.Visible(closest,ray.Origin+ray.Direction*nearest,camera,settings.GlassCheck) then return nil end
     return closest
 end
 function Combat.KeyActive(picker,_state)
@@ -848,6 +867,7 @@ addToggle(PredictionGroup, 'silent_bullet_drop_compensation', 'Bullet Drop Compe
 local ChecksGroup = Tabs.Main:AddRightGroupbox('Checks')
 addToggle(ChecksGroup, 'silent_teamcheck', 'Team Check', Silent, 'TeamCheck')
 addToggle(ChecksGroup, 'silent_visiblecheck', 'Wallcheck', Silent, 'VisibleCheck')
+addToggle(ChecksGroup, 'silent_glasscheck', 'Glass Check', Silent, 'GlassCheck')
 addToggle(ChecksGroup, 'silent_hitscan', 'Hitscan', Silent, 'Hitscan')
 
 local TriggerGroup = Tabs.Main:AddLeftGroupbox('Triggerbot')
@@ -862,6 +882,7 @@ addSlider(TriggerGroup, 'trigger_shoot', 'Shoot Time', TriggerBotSettings, 'Shoo
 addTargets(TriggerGroup, 'trigger_targets', TriggerBotSettings)
 addToggle(TriggerGroup, 'trigger_teamcheck', 'Team Check', TriggerBotSettings, 'TeamCheck')
 addToggle(TriggerGroup, 'trigger_visiblecheck', 'Wallcheck', TriggerBotSettings, 'VisibleCheck')
+addToggle(TriggerGroup, 'trigger_glasscheck', 'Glass Check', TriggerBotSettings, 'GlassCheck')
 addToggle(TriggerGroup, 'trigger_magnetic', 'Magnetic Trigger', TriggerBotSettings, 'Magnetic')
 addSlider(TriggerGroup, 'trigger_distance', 'Max Distance', TriggerBotSettings, 'MaxDistance', 50, 5000, 0, ' studs')
 
@@ -980,6 +1001,7 @@ RageGroup:AddDropdown('rage_hitpart', {
 addTargets(RageGroup, 'rage_targets', Rage)
 local RageChecks = Tabs.Ragebot:AddLeftGroupbox('Checks')
 addToggle(RageChecks, 'rage_visiblecheck', 'Wallcheck', Rage, 'VisibleCheck')
+addToggle(RageChecks, 'rage_glasscheck', 'Glass Check', Rage, 'GlassCheck')
 addToggle(RageChecks, 'rage_teamcheck', 'Team Check', Rage, 'TeamCheck')
 addToggle(RageChecks, 'rage_hitscan', 'Hitscan', Rage, 'Hitscan')
 addToggle(RageChecks, 'rage_distancecheck', 'Distance Check', Rage, 'DistanceCheck')
@@ -2882,6 +2904,35 @@ local installPreview=function(Context)
             if Preview.LastError~=tostring(err) then Preview.LastError=tostring(err);warn("[Visuals 3D Preview]",err) end
         end
     end)
+
+    -- Sync Highlight ESP vào 3D preview model
+    local function refreshPreviewHL()
+        if not Preview.model or not Preview.model.Parent then return end
+        local kind = Preview.actor and Preview.actor.Kind
+        local cfg = kind and Sense.highlightSettings and Sense.highlightSettings[kind]
+        local espEnabled = Sense.teamSettings[kind] and Sense.teamSettings[kind].enabled
+        local hl = Preview.model:FindFirstChildOfClass("Highlight")
+        if cfg and cfg.enabled and espEnabled then
+            if not hl then
+                hl = Instance.new("Highlight")
+                hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+                hl.Parent = Preview.model
+            end
+            if kind == "zombies" then
+                hl.FillColor = (cfg.abilityColors and cfg.abilityColors[3]) or cfg.fillColor
+            else
+                hl.FillColor = cfg.fillColor
+            end
+            hl.OutlineColor = cfg.outlineColor
+            hl.FillTransparency = cfg.fillTransp
+            hl.OutlineTransparency = cfg.outlineTransp
+        elseif hl then
+            hl:Destroy()
+        end
+    end
+    Preview.RefreshHL = refreshPreviewHL
+    connect(RunService.Heartbeat, refreshPreviewHL)
+
     return Preview
 end
 
@@ -3396,7 +3447,6 @@ end
 
 -- ── SPINBOT ──────────────────────────────────────────────────────
 do
-    local SpinSec = movementPages[1]:AddSection({Title="Spinbot", Side="Right"})
     local spinEnabled = false
     local spinSpeed = 20
     local spinHeartConn = nil
@@ -3466,10 +3516,31 @@ do
         end)
     end
 
-    SpinSec:AddToggle({Text="Enable Spinbot", Flag="spinbot_enabled", Default=false,
+    right:AddToggle({Text="Enable Spinbot", Flag="spinbot_enabled", Default=false,
         Callback=function(v) spinEnabled=v; bindSpin() end})
-    SpinSec:AddSlider({Text="Spin Speed", Flag="spinbot_speed", Min=1, Max=100, Default=20, Rounding=1, Suffix="",
+    right:AddSlider({Text="Spin Speed", Flag="spinbot_speed", Min=1, Max=100, Default=20, Rounding=1, Suffix="",
         Callback=function(v) spinSpeed=v end})
+
+    -- Third Person Unlock
+    local tpEnabled = false
+    right:AddToggle({Text="Third Person Unlock", Flag="thirdperson_enabled", Default=false,
+        Callback=function(v)
+            tpEnabled=v
+            if v then
+                task.spawn(function()
+                    while tpEnabled do
+                        pcall(function()
+                            for _,t in ipairs(getgc(true)) do
+                                if type(t)=="table" and rawget(t,"FIRST_PERSON")~=nil then
+                                    t.FIRST_PERSON=false
+                                end
+                            end
+                        end)
+                        task.wait(0.8)
+                    end
+                end)
+            end
+        end})
 
     local prevDestroySpinbot = Combat.Destroy
     Combat.Destroy = function()
@@ -3487,7 +3558,6 @@ local GunPage = legacyPage(Tabs.Mods, modPages, 'Gun Mods')
 local TurretPage = legacyPage(Tabs.Mods, modPages, 'Turret Mods')
 local VehiclePage = legacyPage(Tabs.Mods, modPages, 'Vehicle Mods')
 local MeleePage = legacyPage(Tabs.Mods, modPages, 'Melee Mods')
-local AKPage = legacyPage(Tabs.Mods, modPages, 'Aura Kill V3')
 local GunVisualsPage = GunPage
 local Gun: {[string]: any}={NoRecoil=false,InstantADS=false,NoSway=false,NoSpread=false,SpreadReduction=100,
     UnlockModes=false,AutoReload=false,ForceHeadshot=false,active=true,originals={},hooks={},nextResolve=0,
@@ -4146,199 +4216,6 @@ do
         task.spawn(function() AK2_findNet(); AK2_getRemote() end)
     end})
 
-    -- ── Aura Kill V3 ──────────────────────────────────────────────────────────
-    -- RINGRING position layer: ForceNextPosition + SimulatePosition +
-    -- FireNextPosition + ServerPosition (impact vec) + CheckCharacterControllable
-    -- Per-UID cooldown, multi-target sorted by distance.
-    -- Reuses AK2_findNet / AK2_fire already defined above.
-    local AK3: {[string]: any} = {
-        enabled      = false,
-        killAI       = true,
-        killZombie   = true,
-        killPlayer   = false,
-        hitPart      = "Head",
-        headYOffset  = 1.5,
-        maxPerCycle  = 4,
-        cooldown     = 0.55,
-        range        = 50,
-        rangeMargin  = 0.3,
-        impactDelay  = 0.28,
-        decoyEnabled = true,
-        decoyOffset  = 3,
-        _lastFire    = {},
-    }
-    Combat.AK3 = AK3
-
-    local ak3DecoyConn = nil
-    local ak3DecoyPos: Vector3? = nil
-
-    local function ak3_rep()
-        local svc = Combat.Service()
-        return svc and svc.Replicator
-    end
-
-    local function ak3_reportedPos()
-        if ak3DecoyPos and AK3.decoyEnabled then return ak3DecoyPos end
-        local rep = ak3_rep(); local a = rep and rep.LocalActor
-        if a then
-            local ok, pos = pcall(function() return a.Position end)
-            if ok and typeof(pos) == "Vector3" then return pos end
-        end
-        local char = Players.LocalPlayer.Character
-        local root = char and (char:FindFirstChild("HumanoidRootPart") or char.PrimaryPart)
-        if root then return root.Position end
-        return nil
-    end
-
-    local function ak3_serverPos()
-        local rep = ak3_rep(); local a = rep and rep.LocalActor
-        if not a then return nil end
-        local ok, sp = pcall(function() return a.ServerPosition end)
-        if ok and typeof(sp) == "Vector3" then return sp end
-        return nil
-    end
-
-    -- RINGRING: CheckCharacterControllable — guard before each fire tick
-    local function ak3_isControllable()
-        local rep = ak3_rep(); if not rep then return true end
-        local a = rep.LocalActor; if not a then return false end
-        local ok, v = pcall(function() return a:CheckCharacterControllable() end)
-        if ok then return v ~= false end
-        local ok2, v2 = pcall(function() return a.CharacterControllable end)
-        if ok2 and v2 ~= nil then return v2 ~= false end
-        return true
-    end
-
-    -- RINGRING: three position methods layered together
-    local function ak3_pushPos(pos)
-        local rep = ak3_rep(); local a = rep and rep.LocalActor
-        if not a then return end
-        pcall(function() a.ForceNextPosition = pos end)
-        pcall(function()
-            if type(a.SimulatePosition)=="function" then a:SimulatePosition(pos)
-            elseif type(rep.SimulatePosition)=="function" then rep:SimulatePosition(pos) end
-        end)
-        pcall(function()
-            if type(a.FireNextPosition)=="function" then a:FireNextPosition(pos)
-            elseif type(rep.FireNextPosition)=="function" then rep:FireNextPosition(pos) end
-        end)
-    end
-
-    local function ak3_tearDecoy()
-        if ak3DecoyConn then ak3DecoyConn:Disconnect(); ak3DecoyConn = nil end
-        ak3DecoyPos = nil
-        local rep = ak3_rep(); local a = rep and rep.LocalActor
-        if a then pcall(function() a.ForceNextPosition = nil end) end
-    end
-
-    -- Main aura loop
-    table.insert(Combat.connections, AimRunService.Heartbeat:Connect(function()
-        if not AK3.enabled then return end
-        if not ak3_isControllable() then return end
-        local net = AK2_findNet(); if not net then return end
-        local rep = ak3_rep(); if not rep then return end
-        local registry = rep.Actors; if not registry then return end
-        local from = ak3_reportedPos(); if not from then return end
-        local now = os.clock()
-
-        local candidates = {}
-        for uid, a in pairs(registry) do
-            if not Combat.IsAlive(a) then continue end
-            local kind = Combat.Kind(a); if not kind then continue end
-            local allow = false
-            if kind=="Zombies" and AK3.killZombie then allow=true end
-            if kind=="NPCs"    and AK3.killAI     then allow=true end
-            if kind=="Players" and AK3.killPlayer then allow=true end
-            if not allow then continue end
-            if (now-(AK3._lastFire[uid] or 0)) < AK3.cooldown then continue end
-            local pos = a.Position
-            if typeof(pos) ~= "Vector3" then continue end
-            local dist = (pos - from).Magnitude
-            if dist > AK3.range then continue end
-            table.insert(candidates, {uid=uid, pos=pos, dist=dist})
-        end
-        table.sort(candidates, function(x, y) return x.dist < y.dist end)
-
-        local fired = 0
-        for _, entry in ipairs(candidates) do
-            if fired >= AK3.maxPerCycle then break end
-            AK3._lastFire[entry.uid] = now
-            -- RINGRING: spoof position to target before Slash
-            local spawnPos = entry.pos + Vector3.new(0, 0.5, 0)
-            ak3_pushPos(spawnPos)
-            AK2_fire(net, "InventoryAction", "Slash", math.random(1, 3))
-            local uid2 = entry.uid
-            local hitPos = {entry.pos.X, entry.pos.Y + AK3.headYOffset, entry.pos.Z}
-            local sp2 = spawnPos
-            task.delay(AK3.impactDelay, function()
-                if not AK3.enabled then return end
-                local n2 = AK2_findNet(); if not n2 then return end
-                -- RINGRING: spoof position again for Impact validation
-                ak3_pushPos(sp2)
-                AK2_fire(n2, "InventoryAction", "Impact", hitPos, uid2, AK3.hitPart)
-            end)
-            fired += 1
-        end
-    end))
-
-    -- Decoy heartbeat — push position every frame
-    table.insert(Combat.connections, AimRunService.Heartbeat:Connect(function()
-        if not AK3.enabled or not AK3.decoyEnabled or not ak3DecoyPos then return end
-        ak3_pushPos(ak3DecoyPos)
-    end))
-
-    -- AK3 lives on its own subtab: Mods → "Aura Kill V3"
-    local ak3l = AKPage:AddSection({Title="Aura Kill V3",Side="Left"})
-    local ak3r = AKPage:AddSection({Title="Decoy & Net",Side="Right"})
-
-    ak3l:AddToggle({Text="Enable",Flag="ak3_enabled",Default=false,
-        Callback=function(v) AK3.enabled=v end})
-    ak3l:AddToggle({Text="Kill NPCs",Flag="ak3_kill_ai",Default=true,
-        Callback=function(v) AK3.killAI=v end})
-    ak3l:AddToggle({Text="Kill Zombies",Flag="ak3_kill_zombie",Default=true,
-        Callback=function(v) AK3.killZombie=v end})
-    ak3l:AddToggle({Text="Kill Players",Flag="ak3_kill_player",Default=false,
-        Callback=function(v) AK3.killPlayer=v end})
-    ak3l:AddDropdown({Text="Hit Part",Flag="ak3_hitpart",
-        Options={"Head","UpperTorso","LowerTorso","LeftUpperArm","RightUpperArm","LeftUpperLeg","RightUpperLeg"},
-        Default="Head",
-        Callback=function(v) AK3.hitPart=v end})
-    ak3l:AddSlider({Text="Max Targets/Tick",Flag="ak3_max_targets",
-        Min=1,Max=20,Default=4,Rounding=1,Suffix="",
-        Callback=function(v) AK3.maxPerCycle=math.clamp(v,1,20) end})
-    ak3l:AddSlider({Text="Hit Cooldown",Flag="ak3_cooldown",
-        Min=0.05,Max=2.0,Default=0.55,Rounding=0.05,Suffix=" s",
-        Callback=function(v) AK3.cooldown=math.clamp(v,0.05,2.0) end})
-    ak3l:AddSlider({Text="Range",Flag="ak3_range",
-        Min=3,Max=100,Default=50,Rounding=1,Suffix=" st",
-        Callback=function(v) AK3.range=math.clamp(v,3,100) end})
-    ak3l:AddSlider({Text="Impact Delay",Flag="ak3_impact_delay",
-        Min=0,Max=1,Default=0.28,Rounding=0.02,Suffix=" s",
-        Callback=function(v) AK3.impactDelay=math.clamp(v,0,1) end})
-
-    ak3r:AddToggle({Text="Decoy Position",Flag="ak3_decoy",Default=true,
-        Callback=function(v) AK3.decoyEnabled=v; if not v then ak3_tearDecoy() end end})
-    ak3r:AddSlider({Text="Decoy Offset",Flag="ak3_decoy_offset",
-        Min=0,Max=10,Default=3,Rounding=0.5,Suffix=" st",
-        Callback=function(v) AK3.decoyOffset=math.clamp(v,0,10) end})
-    ak3r:AddButton({Text="Drop Decoy (Crosshair)",Callback=function()
-        if not AK3.decoyEnabled then return end
-        local cam = workspace.CurrentCamera
-        local vp = cam.ViewportSize
-        local ray = cam:ViewportPointToRay(vp.X/2, vp.Y/2)
-        local params = RaycastParams.new()
-        params.FilterType = Enum.RaycastFilterType.Exclude
-        local ign = {cam}
-        if Players.LocalPlayer.Character then table.insert(ign, Players.LocalPlayer.Character) end
-        params.FilterDescendantsInstances = ign
-        local r = workspace:Raycast(ray.Origin, ray.Direction*300, params)
-        if r then ak3DecoyPos = r.Position + Vector3.new(0, AK3.decoyOffset, 0) end
-    end})
-    ak3r:AddButton({Text="Recall Decoy",Callback=function() ak3_tearDecoy() end})
-    ak3r:AddButton({Text="Rescan Net",Callback=function()
-        AK2._net=nil; AK2._remote=nil; AK2._netRetry=0
-        task.spawn(function() AK2_findNet(); AK2_getRemote() end)
-    end})
 
     local vp=VehiclePage
     local vl=vp:AddSection({Title="Driving",Side="Left"});local vr=vp:AddSection({Title="Flight",Side="Right"})
@@ -5394,30 +5271,6 @@ Combat.Destroy = function()
     destroyBeforeWorld()
 end
 
-end
-
-do
-    -- Third Person Unlock — right side of the existing Movement page
-    local CharSec=movementPages[1]:AddSection({Title="Character",Side="Right"})
-    local tpEnabled=false
-    CharSec:AddToggle({Text="Third Person Unlock",Flag="thirdperson_enabled",Default=false,
-        Callback=function(v)
-            tpEnabled=v
-            if v then
-                task.spawn(function()
-                    while tpEnabled do
-                        pcall(function()
-                            for _,t in ipairs(getgc(true)) do
-                                if type(t)=="table" and rawget(t,"FIRST_PERSON")~=nil then
-                                    t.FIRST_PERSON=false
-                                end
-                            end
-                        end)
-                        task.wait(0.8)
-                    end
-                end)
-            end
-        end})
 end
 
 addSubtabs('Movement', movementPages)
