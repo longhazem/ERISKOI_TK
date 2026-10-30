@@ -1027,6 +1027,7 @@ local Sense = (function()
     local white, black = Color3.new(1,1,1), Color3.new(0,0,0)
     local t = {
         enabled=true, limitDistance=false, maxDistance=1000, box=false, box3d=false, boxColor={white,1}, box3dColor={white,1},
+        boxStyle="Full", simpleBox=false,
         boxOutline=true, boxOutlineColor={black,1}, boxOutlineThickness=1,
         boxFill=false, boxFillColor={Color3.fromRGB(150,80,255),.2},
         healthBar=false, healthyColor=Color3.new(0,1,0), dyingColor=Color3.new(1,0,0),
@@ -1377,6 +1378,24 @@ local Sense = (function()
         d.Position=pos;d.Size=size;d.Filled=filled;d.Thickness=thickness or 1;style(d,value,override)
         return d
     end
+    local function cornerBox(o,key,pos,size,value,override)
+        local view=o.previewViewportSize or workspace.CurrentCamera.ViewportSize
+        local corner=(pos+size):Min(view)
+        pos=pos:Max(Vector2.zero)
+        size=corner-pos
+        if size.X<=0 or size.Y<=0 then return end
+        local cl=math.max(4,math.min(size.X,size.Y)*0.25)
+        local x0,y0=pos.X,pos.Y
+        local x1,y1=pos.X+size.X,pos.Y+size.Y
+        line(o,key.."cTLh",Vector2.new(x0,y0),Vector2.new(x0+cl,y0),value,1,override)
+        line(o,key.."cTLv",Vector2.new(x0,y0),Vector2.new(x0,y0+cl),value,1,override)
+        line(o,key.."cTRh",Vector2.new(x1,y0),Vector2.new(x1-cl,y0),value,1,override)
+        line(o,key.."cTRv",Vector2.new(x1,y0),Vector2.new(x1,y0+cl),value,1,override)
+        line(o,key.."cBLh",Vector2.new(x0,y1),Vector2.new(x0+cl,y1),value,1,override)
+        line(o,key.."cBLv",Vector2.new(x0,y1),Vector2.new(x0,y1-cl),value,1,override)
+        line(o,key.."cBRh",Vector2.new(x1,y1),Vector2.new(x1-cl,y1),value,1,override)
+        line(o,key.."cBRv",Vector2.new(x1,y1),Vector2.new(x1,y1-cl),value,1,override)
+    end
     local function textAt(o,key,value,pos,col,outline,override)
         local view=workspace.CurrentCamera.ViewportSize
         if pos.X<0 or pos.Y<0 or pos.X>view.X or pos.Y>view.Y then return end
@@ -1617,8 +1636,27 @@ local Sense = (function()
             local size=max-min;local cx=(min.X+max.X)*.5
             if t.boxFill then square(o,"fill",min,size,t.boxFillColor,true,1,override) end
             if t.box then
-                if t.boxOutline then square(o,"boxOutline",min,size,t.boxOutlineColor,false,1+2*t.boxOutlineThickness) end
-                square(o,"box",min,size,t.boxColor,false,1,override)
+                if t.boxStyle=="Corner" then
+                    cornerBox(o,"box",min,size,t.boxColor,override)
+                else
+                    if t.boxOutline then square(o,"boxOutline",min,size,t.boxOutlineColor,false,1+2*t.boxOutlineThickness) end
+                    square(o,"box",min,size,t.boxColor,false,1,override)
+                end
+            end
+            -- SimpleESP: SelectionBox 3D outline trên character model
+            if t.simpleBox and a.Character and (o.preview or a.Character:IsDescendantOf(workspace)) then
+                local sbox=o.adornments["simpleESP"]
+                if not sbox then
+                    sbox=Instance.new("SelectionBox")
+                    sbox.LineThickness=0.04
+                    sbox.SurfaceTransparency=1
+                    sbox.Name="SimpleESP"
+                    sbox.Parent=workspace
+                    o.adornments["simpleESP"]=sbox
+                end
+                local col=override or (color(t.boxColor))
+                sbox.Color3=col;sbox.SurfaceColor3=col
+                sbox.Adornee=a.Character;sbox.Visible=true
             end
             if t.box3d then
                 for i,edge in ipairs(edges) do
@@ -1994,6 +2032,21 @@ local function buildTeamPage(page, team)
         Options = {"2D", "3D"},
         Default = "2D",
         Callback = function(v) boxState.kind = v; applyBox() end
+    })
+
+    Boxes:AddDropdown({
+        Text = "Box Style",
+        Flag = prefix .. "box_style",
+        Options = {"Full", "Corner"},
+        Default = "Full",
+        Callback = function(v) t.boxStyle = v end
+    })
+
+    Boxes:AddToggle({
+        Text = "Simple ESP",
+        Flag = prefix .. "simple_box",
+        Default = false,
+        Callback = function(v) t.simpleBox = v end
     })
 
     Boxes:AddColorPicker({
