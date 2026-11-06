@@ -109,7 +109,7 @@ Library.Create = function(self, class, properties)
 end
 
 local Window = Library:CreateWindow({
-    Title = 'Tokaihub | BRM5',
+    Title = 'Tokaihub | BRM5 Gen2 v1.4.4b',
     Center = true,
     AutoShow = true,
     Size = UDim2.fromOffset(568, 660),
@@ -146,6 +146,22 @@ local Silent = {
     GradientSpin=false,GradientSpinSpeed=1,
     GradientColorA=Color3.fromRGB(224,224,224),GradientColorB=Color3.fromRGB(120,120,120),
     AutoPrediction=true,BulletDropCompensation=true,
+    -- Extended aim features (Zeth)
+    LockMode="Sticky",         -- "Sticky" | "Dynamic" | "Manual"
+    TargetPriority="Closest to Aim", -- "Closest to Aim" | "Closest Distance" | "Lowest HP"
+    SelectionRef="Crosshair",  -- "Crosshair" | "Mouse Cursor"
+    LockKey="Q",               -- Manual mode key
+    LockRadius=140,            -- Manual mode search radius (px)
+    DynamicHysteresis=24,      -- Dynamic switch threshold (px)
+    AimSmooth=false,           -- Smooth aim enabled
+    AimSmoothFactor=7,         -- Smooth factor (1-15)
+    AimDeadzone=2,             -- Min px to move per frame
+    AimMaxStep=28,             -- Max px to move per frame
+    CameraFallback=true,       -- Camera CFrame fallback when mousemoverel unavail
+    ReacquireOnAim=true,       -- Reacquire target when RMB pressed
+    ShowTargetDot=false,       -- Show dot on locked target
+    TargetRefreshRate=0.12,    -- Rescan interval (seconds)
+    TriggerHoldOnly=false,     -- Triggerbot only fires while RMB held
 }
 local TriggerBotSettings = {
     Enabled=false,Targets={NPCs=true,Players=true},TeamCheck=false,VisibleCheck=true,GlassCheck=false,
@@ -419,9 +435,32 @@ function Combat.FindTarget(settings,camera,mouse,sticky)
     end
     if settings.StickyAim and sticky then local current=candidate(sticky);if current then return current end end
     local best
+    local priority = settings.TargetPriority or "Closest to Aim"
+    local origin2 = Combat.Origin(camera or workspace.CurrentCamera)
     for _,a in ipairs(Combat.actors) do
         local current=candidate(a)
-        if current and (not best or current.distance<best.distance) then best=current end
+        if current then
+            if not best then
+                best=current
+            else
+                if priority=="Lowest HP" then
+                    local function getHP(actor)
+                        if type(actor.Health)=="number" then return actor.Health end
+                        if type(actor.Health)=="table" then
+                            return actor.Health.Current or actor.Health.Value or 100
+                        end
+                        return 100
+                    end
+                    if getHP(current.actor)<getHP(best.actor) then best=current end
+                elseif priority=="Closest Distance" then
+                    local d1=(current.actor.Position-origin2).Magnitude
+                    local d2=(best.actor.Position-origin2).Magnitude
+                    if d1<d2 then best=current end
+                else -- "Closest to Aim" (default)
+                    if current.distance<best.distance then best=current end
+                end
+            end
+        end
     end
     return best
 end
@@ -531,10 +570,92 @@ function Combat.Frame(dt)
         return
     end
     if not blocked and Silent.Enabled and Combat.silentActive then
-        Combat.target=Combat.FindTarget(Silent,nil,nil,Combat.sticky)
-        Combat.sticky=Combat.target and Combat.target.actor
-    else Combat.target=nil;Combat.sticky=nil end
-    if not blocked and TriggerBotSettings.Enabled and triggerActive then
+        local lockMode = Silent.LockMode or "Sticky"
+        -- Mouse or Crosshair reference point for distance calc
+        local refPoint = aim_getMouseLocation()
+        if Silent.SelectionRef == "Mouse Cursor" then
+            refPoint = aim_getMouseLocation()
+        end
+        -- Target refresh rate throttle
+        Combat.nextTargetScan = Combat.nextTargetScan or 0
+        local now = os.clock()
+        if now >= Combat.nextTargetScan then
+            Combat.nextTargetScan = now + (tonumber(Silent.TargetRefreshRate) or 0.12)
+            if lockMode == "Sticky" then
+                Combat.target = Combat.FindTarget(Silent, AimCamera, refPoint, Combat.sticky)
+                Combat.sticky = Combat.target and Combat.target.actor
+            elseif lockMode == "Dynamic" then
+                -- Stay on current sticky unless a clearly better target appears
+                local best = Combat.FindTarget(Silent, AimCamera, refPoint, nil)
+                if best then
+                    if not Combat.sticky or not Combat.IsAlive(Combat.sticky) then
+                        Combat.sticky = best.actor
+                        Combat.target = best
+                    else
+                        -- Hysteresis: only switch if new target is significantly closer to aim
+                        local curCandidate = Combat.FindTarget(Silent, AimCamera, refPoint, Combat.sticky)
+                        local curDist = curCandidate and curCandidate.distance or math.huge
+                        local hysteresis = tonumber(Silent.DynamicHysteresis) or 24
+                        if best.actor ~= Combat.sticky and best.distance + hysteresis < curDist then
+                            Combat.sticky = best.actor
+                            Combat.target = best
+                        else
+                            Combat.target = curCandidate
+                        end
+                    end
+                else
+                    Combat.target = nil
+                    if not Combat.IsAlive(Combat.sticky) then Combat.sticky = nil end
+                end
+            elseif lockMode == "Manual" then
+                -- Target is set by manual key; just validate sticky is still alive
+                if Combat.sticky and Combat.IsAlive(Combat.sticky) then
+                    Combat.target = Combat.FindTarget(Silent, AimCamera, refPoint, Combat.sticky)
+                else
+                    if not Combat.IsAlive(Combat.sticky) then
+                        Combat.sticky = nil
+                        Combat.manualLocked = false
+                    end
+                    Combat.target = nil
+                end
+            end
+        else
+            -- Between refresh cycles, validate current target
+            if Combat.sticky and not Combat.IsAlive(Combat.sticky) then
+                Combat.sticky = nil
+                Combat.target = nil
+                Combat.manualLocked = false
+            end
+        end
+        -- Smooth aim step toward locked target
+        if Combat.target and Silent.AimSmooth then
+            local actor = Combat.target.actor
+            if Combat.IsAlive(actor) then
+                local part = Combat.target.part
+                local worldPos = part and Combat.PartPosition(actor, part) or actor.Position
+                if worldPos then
+                    Combat.SmoothStep(worldPos, AimCamera, dt)
+                end
+            end
+        else
+            Combat.smoothInitialized = false
+        end
+    else
+        if Silent.LockMode ~= "Manual" then
+            Combat.target=nil;Combat.sticky=nil
+        else
+            -- Manual: keep sticky locked even when silentActive key not held
+            if Combat.sticky and Combat.IsAlive(Combat.sticky) then
+                Combat.target = Combat.FindTarget(Silent, AimCamera, aim_getMouseLocation(), Combat.sticky)
+            else
+                Combat.target=nil
+            end
+        end
+    end
+    -- Triggerbot HoldOnly gate
+    local rmb = AimUIS:IsMouseButtonPressed(Enum.UserInputType.MouseButton2)
+    local triggerGated = not Silent.TriggerHoldOnly or rmb
+    if not blocked and TriggerBotSettings.Enabled and triggerActive and triggerGated then
         local actor=Combat.TriggerTarget(TriggerBotSettings,AimCamera,aim_getMouseLocation())
         Combat.TriggerStep(actor,os.clock(),Combat.Fire)
     else Combat.triggerActor=nil;Combat.targetSince=0 end
@@ -550,6 +671,97 @@ function Combat.Destroy()
 end
 getgenv().LinoriaCombat=Combat
 
+-- ── Smooth Aim Engine (Zeth feature) ────────────────────────────────────────
+-- Tracks a lerped world position and applies incremental mouse movement.
+Combat.smoothTarget = Vector3.zero
+Combat.smoothInitialized = false
+function Combat.SmoothStep(worldPos, camera, dt)
+    local cam = camera or AimCamera or workspace.CurrentCamera
+    if not cam then return end
+    if not Combat.smoothInitialized then
+        Combat.smoothTarget = worldPos
+        Combat.smoothInitialized = true
+    end
+    local factor = tonumber(Silent.AimSmoothFactor) or 7
+    local blend = 1 - math.exp(-math.max(3, 14/math.max(factor,1)) * (dt or 1/60))
+    blend = math.clamp(blend, 0.02, 0.35)
+    Combat.smoothTarget = Combat.smoothTarget:Lerp(worldPos, blend)
+    local sp = cam:WorldToViewportPoint(Combat.smoothTarget)
+    local mouse = aim_getMouseLocation()
+    local dx = sp.X - mouse.X
+    local dy = sp.Y - mouse.Y
+    local mag = math.sqrt(dx*dx + dy*dy)
+    local deadzone = tonumber(Silent.AimDeadzone) or 2
+    if mag < deadzone then return end
+    local maxStep = tonumber(Silent.AimMaxStep) or 28
+    dx = math.clamp(dx, -maxStep, maxStep)
+    dy = math.clamp(dy, -maxStep, maxStep)
+    if Silent.CameraFallback and not pcall(function()
+        mousemoverel(dx, dy)
+    end) then
+        local lookCF = CFrame.lookAt(cam.CFrame.Position, Combat.smoothTarget, Vector3.yAxis)
+        cam.CFrame = cam.CFrame:Lerp(lookCF, 0.15)
+    end
+end
+
+-- ── Target Dot Drawing ────────────────────────────────────────────────────
+local TargetDot
+if Drawing then
+    TargetDot = Drawing.new("Circle")
+    TargetDot.Radius = 4
+    TargetDot.Filled = true
+    TargetDot.Color = Color3.fromRGB(255, 60, 60)
+    TargetDot.Thickness = 1
+    TargetDot.Transparency = 1
+    TargetDot.Visible = false
+    TargetDot.NumSides = 16
+    table.insert(Combat.drawings, TargetDot)
+end
+table.insert(Combat.connections, AimRunService.RenderStepped:Connect(function()
+    if not TargetDot then return end
+    local cam = AimCamera or workspace.CurrentCamera
+    local target = Combat.target or Combat.sticky and {actor=Combat.sticky,part=nil}
+    local actor = target and target.actor
+    local show = Silent.Enabled and Silent.ShowTargetDot and actor and Combat.IsAlive(actor) and cam
+    if show then
+        local part = actor.RootPart or (actor.Character and actor.Character:FindFirstChild("HumanoidRootPart"))
+        local pos = actor.Position or (part and part.Position)
+        if pos then
+            local sp, onScreen = cam:WorldToViewportPoint(pos)
+            TargetDot.Position = Vector2.new(sp.X, sp.Y)
+            TargetDot.Visible = onScreen
+            return
+        end
+    end
+    TargetDot.Visible = false
+end))
+
+-- ── Manual Lock State ─────────────────────────────────────────────────────
+Combat.manualLocked = false
+local manualKeyNames = { Q="q", E="e", T="t", MouseButton3="MouseButton3" }
+table.insert(Combat.connections, AimUIS.InputBegan:Connect(function(input, gp)
+    if gp or Library:IsTyping() then return end
+    if Silent.LockMode ~= "Manual" or not Silent.Enabled then return end
+    local kn = input.KeyCode.Name
+    local bn = input.UserInputType.Name
+    local bound = Silent.LockKey
+    if kn == bound or bn == bound then
+        if Combat.manualLocked and Combat.sticky then
+            Combat.manualLocked = false
+            Combat.sticky = nil
+            Combat.target = nil
+        else
+            local cam = AimCamera or workspace.CurrentCamera
+            local mouse = aim_getMouseLocation()
+            local overrideSettings = setmetatable({FOVEnabled=true, FOV=Silent.LockRadius, StickyAim=false}, {__index=Silent})
+            local found = Combat.FindTarget(overrideSettings, cam, mouse, nil)
+            if found then
+                Combat.sticky = found.actor
+                Combat.manualLocked = true
+            end
+        end
+    end
+end))
 
 -- Scope redirection to this game's local firearm discharge. The unchanged
 -- discharge code uses the returned muzzle frame for both simulation and replication.
@@ -860,6 +1072,62 @@ addSlider(SilentGroup, 'silent_distance', 'Max Distance', Silent, 'MaxDistance',
 addToggle(SilentGroup, 'silent_fov_enabled', 'FOV Check', Silent, 'FOVEnabled')
 addToggle(SilentGroup, 'silent_sticky', 'Sticky Aim', Silent, 'StickyAim')
 
+-- ── Aim Lock (Zeth extended targeting) ──────────────────────────────────────
+local AimLockGroup = Tabs.Main:AddLeftGroupbox('Aim Lock')
+
+AimLockGroup:AddDropdown('silent_lock_mode', {
+    Text = 'Lock Mode', Values = { 'Sticky', 'Dynamic', 'Manual' },
+    Default = Silent.LockMode,
+}):OnChanged(function(v) Silent.LockMode = v; Combat.sticky = nil; Combat.target = nil end)
+
+-- Dynamic: hysteresis threshold
+local DynBox = AimLockGroup:AddDependencyBox()
+addSlider(DynBox, 'silent_dyn_hyst', 'Hysteresis', Silent, 'DynamicHysteresis', 1, 120, 0, ' px')
+DynBox:SetupDependencies({ { Options.silent_lock_mode, 'Dynamic' } })
+
+-- Manual: key bind + search radius
+local ManBox = AimLockGroup:AddDependencyBox()
+ManBox:AddDropdown('silent_lock_key', {
+    Text = 'Lock Key',
+    Values = {
+        'Q','E','F','G','H','X','Z','C','V','R','T','Y',
+        'LeftAlt','RightAlt','LeftControl','RightControl',
+        'LeftShift','RightShift','CapsLock','Tab',
+        'Backspace','Delete','Insert','Home','End',
+        'PageUp','PageDown',
+        'F1','F2','F3','F4','F5','F6','F7','F8','F9','F10','F11','F12',
+    },
+    Default = Silent.LockKey,
+}):OnChanged(function(v) Silent.LockKey = v end)
+addSlider(ManBox, 'silent_lock_radius', 'Lock Radius', Silent, 'LockRadius', 20, 500, 0, ' px')
+ManBox:SetupDependencies({ { Options.silent_lock_mode, 'Manual' } })
+
+AimLockGroup:AddDropdown('silent_priority', {
+    Text = 'Target Priority',
+    Values = { 'Closest to Aim', 'Closest Distance', 'Lowest HP' },
+    Default = Silent.TargetPriority,
+}):OnChanged(function(v) Silent.TargetPriority = v; Combat.sticky = nil; Combat.target = nil end)
+
+AimLockGroup:AddDropdown('silent_selection_ref', {
+    Text = 'Selection Reference',
+    Values = { 'Crosshair', 'Mouse Cursor' },
+    Default = Silent.SelectionRef,
+}):OnChanged(function(v) Silent.SelectionRef = v end)
+
+-- Smooth Aim + sub-options
+addToggle(AimLockGroup, 'silent_smooth', 'Smooth Aim', Silent, 'AimSmooth')
+local SmoothBox = AimLockGroup:AddDependencyBox()
+addSlider(SmoothBox, 'silent_smooth_factor',   'Smooth Factor', Silent, 'AimSmoothFactor',  1,  15, 0, '')
+addSlider(SmoothBox, 'silent_smooth_deadzone', 'Deadzone',      Silent, 'AimDeadzone',       0,  20, 0, ' px')
+addSlider(SmoothBox, 'silent_smooth_maxstep',  'Max Step',      Silent, 'AimMaxStep',        4, 120, 0, ' px')
+addToggle(SmoothBox, 'silent_cam_fallback', 'Camera Fallback', Silent, 'CameraFallback')
+SmoothBox:SetupDependencies({ { Toggles.silent_smooth, true } })
+
+addToggle(AimLockGroup, 'silent_target_dot',  'Target Dot',        Silent, 'ShowTargetDot')
+addToggle(AimLockGroup, 'silent_reacquire',   'Reacquire on Aim',  Silent, 'ReacquireOnAim')
+addToggle(AimLockGroup, 'silent_hold_only',   'Hold-Only Trigger', Silent, 'TriggerHoldOnly')
+-- ────────────────────────────────────────────────────────────────────────────
+
 local PredictionGroup = Tabs.Main:AddRightGroupbox('Prediction')
 addToggle(PredictionGroup, 'silent_auto_prediction', 'Auto Prediction', Silent, 'AutoPrediction')
 addToggle(PredictionGroup, 'silent_bullet_drop_compensation', 'Bullet Drop Compensation', Silent, 'BulletDropCompensation')
@@ -1027,7 +1295,6 @@ local Sense = (function()
     local white, black = Color3.new(1,1,1), Color3.new(0,0,0)
     local t = {
         enabled=true, limitDistance=false, maxDistance=1000, box=false, box3d=false, boxColor={white,1}, box3dColor={white,1},
-        boxStyle="Full", simpleBox=false,
         boxOutline=true, boxOutlineColor={black,1}, boxOutlineThickness=1,
         boxFill=false, boxFillColor={Color3.fromRGB(150,80,255),.2},
         healthBar=false, healthyColor=Color3.new(0,1,0), dyingColor=Color3.new(1,0,0),
@@ -1378,24 +1645,6 @@ local Sense = (function()
         d.Position=pos;d.Size=size;d.Filled=filled;d.Thickness=thickness or 1;style(d,value,override)
         return d
     end
-    local function cornerBox(o,key,pos,size,value,override)
-        local view=o.previewViewportSize or workspace.CurrentCamera.ViewportSize
-        local corner=(pos+size):Min(view)
-        pos=pos:Max(Vector2.zero)
-        size=corner-pos
-        if size.X<=0 or size.Y<=0 then return end
-        local cl=math.max(4,math.min(size.X,size.Y)*0.25)
-        local x0,y0=pos.X,pos.Y
-        local x1,y1=pos.X+size.X,pos.Y+size.Y
-        line(o,key.."cTLh",Vector2.new(x0,y0),Vector2.new(x0+cl,y0),value,1,override)
-        line(o,key.."cTLv",Vector2.new(x0,y0),Vector2.new(x0,y0+cl),value,1,override)
-        line(o,key.."cTRh",Vector2.new(x1,y0),Vector2.new(x1-cl,y0),value,1,override)
-        line(o,key.."cTRv",Vector2.new(x1,y0),Vector2.new(x1,y0+cl),value,1,override)
-        line(o,key.."cBLh",Vector2.new(x0,y1),Vector2.new(x0+cl,y1),value,1,override)
-        line(o,key.."cBLv",Vector2.new(x0,y1),Vector2.new(x0,y1-cl),value,1,override)
-        line(o,key.."cBRh",Vector2.new(x1,y1),Vector2.new(x1-cl,y1),value,1,override)
-        line(o,key.."cBRv",Vector2.new(x1,y1),Vector2.new(x1,y1-cl),value,1,override)
-    end
     local function textAt(o,key,value,pos,col,outline,override)
         local view=workspace.CurrentCamera.ViewportSize
         if pos.X<0 or pos.Y<0 or pos.X>view.X or pos.Y>view.Y then return end
@@ -1636,27 +1885,8 @@ local Sense = (function()
             local size=max-min;local cx=(min.X+max.X)*.5
             if t.boxFill then square(o,"fill",min,size,t.boxFillColor,true,1,override) end
             if t.box then
-                if t.boxStyle=="Corner" then
-                    cornerBox(o,"box",min,size,t.boxColor,override)
-                else
-                    if t.boxOutline then square(o,"boxOutline",min,size,t.boxOutlineColor,false,1+2*t.boxOutlineThickness) end
-                    square(o,"box",min,size,t.boxColor,false,1,override)
-                end
-            end
-            -- SimpleESP: SelectionBox 3D outline trên character model
-            if t.simpleBox and a.Character and (o.preview or a.Character:IsDescendantOf(workspace)) then
-                local sbox=o.adornments["simpleESP"]
-                if not sbox then
-                    sbox=Instance.new("SelectionBox")
-                    sbox.LineThickness=0.04
-                    sbox.SurfaceTransparency=1
-                    sbox.Name="SimpleESP"
-                    sbox.Parent=workspace
-                    o.adornments["simpleESP"]=sbox
-                end
-                local col=override or (color(t.boxColor))
-                sbox.Color3=col;sbox.SurfaceColor3=col
-                sbox.Adornee=a.Character;sbox.Visible=true
+                if t.boxOutline then square(o,"boxOutline",min,size,t.boxOutlineColor,false,1+2*t.boxOutlineThickness) end
+                square(o,"box",min,size,t.boxColor,false,1,override)
             end
             if t.box3d then
                 for i,edge in ipairs(edges) do
@@ -2034,21 +2264,6 @@ local function buildTeamPage(page, team)
         Callback = function(v) boxState.kind = v; applyBox() end
     })
 
-    Boxes:AddDropdown({
-        Text = "Box Style",
-        Flag = prefix .. "box_style",
-        Options = {"Full", "Corner"},
-        Default = "Full",
-        Callback = function(v) t.boxStyle = v end
-    })
-
-    Boxes:AddToggle({
-        Text = "Simple ESP",
-        Flag = prefix .. "simple_box",
-        Default = false,
-        Callback = function(v) t.simpleBox = v end
-    })
-
     Boxes:AddColorPicker({
         Text = "Box Color",
         Flag = prefix .. "boxColor",
@@ -2381,6 +2596,218 @@ local function buildTeamPage(page, team)
 end
 
 buildTeamPage(NpcPage,"npc")
+
+-- ── NPC Performance (Zeth) ───────────────────────────────────────────────────
+local NpcPerfGroup = Tabs.Visuals:AddLeftGroupbox('NPC Performance')
+table.insert(NpcPage.Groups, NpcPerfGroup)
+
+NpcPerfGroup:AddSlider('npc_scan_interval', {
+    Text = 'Scan Interval', Min = 0.05, Max = 0.5,
+    Default = 0.4, Rounding = 2, Suffix = ' s',
+}):OnChanged(function(v)
+    -- patch the scan throttle live
+    if Sense then Sense.scanAt = os.clock() end  -- forces immediate resync
+    rawset(Sense, '_scanInterval', v)
+end)
+
+NpcPerfGroup:AddSlider('npc_batch_budget', {
+    Text = 'Draw Batch', Min = 10, Max = 120, Default = 60,
+    Rounding = 0, Suffix = '',
+}):OnChanged(function(v)
+    if Sense then rawset(Sense, '_batchBudget', v) end
+end)
+
+NpcPerfGroup:AddButton('Rescan Now', function()
+    if Sense and Sense.Sync then
+        Sense.Sync(true)
+        Library:Notify('NPC rescan complete.')
+    end
+end)
+
+NpcPerfGroup:AddButton('ESP Diagnostics', function()
+    local actors = Combat and Combat.actors and #Combat.actors or 0
+    local errs = 0
+    if Sense and Sense.errors then
+        for _ in pairs(Sense.errors) do errs = errs + 1 end
+    end
+    local objs = 0
+    if Sense and Sense.objects then
+        for _ in pairs(Sense.objects) do objs = objs + 1 end
+    end
+    Library:Notify(string.format(
+        'Actors: %d | ESP objs: %d | Errors: %d', actors, objs, errs))
+end)
+
+-- ── Game NVG Overlay + Vehicle ESP ───────────────────────────────────────────
+local MiscVisual = {
+    nvgOverride = false,
+    nvgOriginal = setmetatable({}, {__mode = 'k'}),
+    nvgNextApply = 0,
+    vehicleService = nil,
+    vehicleResolveAt = 0,
+    vehicleDrawings = {},
+}
+
+local function nvgGuis()
+    local found = {}
+    local player = game:GetService('Players').LocalPlayer
+    local playerGui = player and player:FindFirstChild('PlayerGui')
+    if not playerGui then return found end
+    for _, gui in ipairs(playerGui:GetChildren()) do
+        if gui:IsA('ScreenGui') and gui.Name == 'NVGInterface' then
+            found[#found + 1] = gui
+        end
+    end
+    return found
+end
+
+local function applyNvgOverlay()
+    local on = Toggles.nvg_overlay and Toggles.nvg_overlay.Value or false
+    local tint = Options.nvg_tint and Options.nvg_tint.Value
+    for _, gui in ipairs(nvgGuis()) do
+        gui.Enabled = on
+        if on and tint then
+            for _, d in ipairs(gui:GetDescendants()) do
+                if d:IsA('ImageLabel') then
+                    if MiscVisual.nvgOriginal[d] == nil then
+                        MiscVisual.nvgOriginal[d] = d.ImageColor3
+                    end
+                    d.ImageColor3 = tint
+                end
+            end
+        end
+    end
+end
+
+-- Re-applies the user's choice while the game recreates NVGInterface.
+-- Does nothing until the user touches the NVG toggle or tint.
+table.insert(Combat.connections, AimRunService.Heartbeat:Connect(function()
+    if not MiscVisual.nvgOverride then return end
+    local now = os.clock()
+    if now < MiscVisual.nvgNextApply then return end
+    MiscVisual.nvgNextApply = now + 0.5
+    pcall(applyNvgOverlay)
+end))
+
+local function getVehicleService()
+    if MiscVisual.vehicleService then return MiscVisual.vehicleService end
+    if os.clock() < MiscVisual.vehicleResolveAt then return nil end
+    MiscVisual.vehicleResolveAt = os.clock() + 3
+    for _, m in ipairs(getloadedmodules()) do
+        if m.Name == 'VehicleService' then
+            local ok, value = pcall(require, m)
+            if ok and type(value) == 'table' and type(value.Vehicles) == 'table' then
+                MiscVisual.vehicleService = value
+                break
+            end
+        end
+    end
+    return MiscVisual.vehicleService
+end
+
+local function vehicleDrawingSet(uid)
+    local set = MiscVisual.vehicleDrawings[uid]
+    if set then return set end
+    set = { box = Drawing.new('Square'), label = Drawing.new('Text') }
+    set.box.Thickness = 1
+    set.box.Filled = false
+    set.box.Color = Color3.fromRGB(255, 170, 0)
+    set.box.Visible = false
+    set.label.Size = 13
+    set.label.Center = true
+    set.label.Outline = true
+    set.label.Color = Color3.new(1, 1, 1)
+    set.label.Visible = false
+    MiscVisual.vehicleDrawings[uid] = set
+    return set
+end
+
+local function renderVehicleEsp()
+    local enabled = Toggles.vehicle_esp and Toggles.vehicle_esp.Value
+    local vs = enabled and getVehicleService() or nil
+    local cam = workspace.CurrentCamera
+    local maxDist = Options.vehicle_esp_dist and Options.vehicle_esp_dist.Value or 1500
+    local vehicles = vs and vs.Vehicles or {}
+    local seen = {}
+
+    if vs and cam then
+        local camPos = cam.CFrame.Position
+        for uid, v in pairs(vehicles) do
+            local model = v.Model
+            if model and model.Parent then
+                local pos = model:GetPivot().Position
+                local dist = (pos - camPos).Magnitude
+                local screen, onScreen = cam:WorldToViewportPoint(pos)
+                if dist <= maxDist and onScreen and screen.Z > 0 then
+                    seen[uid] = true
+                    local set = vehicleDrawingSet(uid)
+                    local size = math.clamp(2400 / math.max(dist, 1), 12, 300)
+                    set.box.Size = Vector2.new(size, size * 0.6)
+                    set.box.Position = Vector2.new(screen.X - size / 2, screen.Y - size * 0.3)
+                    set.box.Visible = true
+
+                    local hp = ''
+                    local hull = v.Healths and v.Healths.Hull
+                    local maxHull = v.MaxHealths and v.MaxHealths.Hull
+                    if type(hull) == 'number' and type(maxHull) == 'number' and maxHull > 0 then
+                        hp = string.format(' | HP %d%%', math.floor(hull / maxHull * 100))
+                    end
+                    set.label.Text = string.format('%s [%dm]%s',
+                        tostring(v._vehicleName or 'Vehicle'), math.floor(dist), hp)
+                    set.label.Position = Vector2.new(screen.X, screen.Y - size * 0.3 - 14)
+                    set.label.Visible = true
+                end
+            end
+        end
+    end
+
+    local stale = {}
+    for uid, set in pairs(MiscVisual.vehicleDrawings) do
+        if not seen[uid] then
+            set.box.Visible = false
+            set.label.Visible = false
+        end
+        if vehicles[uid] == nil then stale[#stale + 1] = uid end
+    end
+    for _, uid in ipairs(stale) do
+        local set = MiscVisual.vehicleDrawings[uid]
+        set.box:Remove()
+        set.label:Remove()
+        MiscVisual.vehicleDrawings[uid] = nil
+    end
+end
+
+table.insert(Combat.connections, AimRunService.RenderStepped:Connect(function()
+    local ok, err = pcall(renderVehicleEsp)
+    if not ok and not MiscVisual.vehicleErr then
+        MiscVisual.vehicleErr = true
+        warn('[Vehicle ESP]', err)
+    end
+end))
+
+local MiscVisGroup = Tabs.Visuals:AddLeftGroupbox('Game NVG & Vehicle ESP')
+MiscVisGroup:AddToggle('nvg_overlay', { Text = 'NVG Overlay', Default = true })
+Toggles.nvg_overlay:OnChanged(function()
+    MiscVisual.nvgOverride = true
+    applyNvgOverlay()
+end)
+Toggles.nvg_overlay:AddColorPicker('nvg_tint', {
+    Default = Color3.fromRGB(130, 255, 130), Title = 'NVG Tint',
+})
+if Options.nvg_tint then
+    Options.nvg_tint:OnChanged(function()
+        MiscVisual.nvgOverride = true
+        applyNvgOverlay()
+    end)
+end
+
+MiscVisGroup:AddToggle('vehicle_esp', { Text = 'Vehicle ESP', Default = false })
+MiscVisGroup:AddSlider('vehicle_esp_dist', {
+    Text = 'Max Distance', Min = 100, Max = 3000, Default = 1500,
+    Rounding = 0, Suffix = ' m',
+})
+-- ────────────────────────────────────────────────────────────────────────────
+
 local PlayerGeneral=PlayersPage:AddSection({Title="General",Side="Left"})
 PlayerGeneral:AddToggle({Text="ESP Enabled",Flag="players_enabled",Default=false,
     Callback=function(v) Sense.teamSettings.players.enabled=v end})
@@ -5435,6 +5862,61 @@ MenuGroup:AddButton('Unload', function() Library:Unload() end)
 MenuGroup:AddLabel('Menu bind'):AddKeyPicker('MenuKeybind', { Default = 'None', NoUI = true, Text = 'Menu keybind' })
 
 Library.ToggleKeybind = Options.MenuKeybind -- Allows you to have a custom keybind for the menu
+
+-- ── Config Clipboard (Zeth export/import) ───────────────────────────────────
+local ConfigGroup = Tabs['UI Settings']:AddLeftGroupbox('Config Clipboard')
+
+ConfigGroup:AddButton('Export to Clipboard', function()
+    local snap = {}
+    for k, ctrl in pairs(Options) do
+        local ok, v = pcall(function() return ctrl.Value end)
+        if ok and v ~= nil then snap[k] = v end
+    end
+    for k, ctrl in pairs(Toggles) do
+        local ok, v = pcall(function() return ctrl.Value end)
+        if ok and v ~= nil then snap['__t_' .. k] = v end
+    end
+    local hs = game:GetService('HttpService')
+    local ok, json = pcall(function() return hs:JSONEncode(snap) end)
+    if ok then
+        pcall(setclipboard, json)
+        Library:Notify('Config exported — paste anywhere to save.')
+    else
+        Library:Notify('Export failed: ' .. tostring(json))
+    end
+end)
+
+ConfigGroup:AddButton('Import from Clipboard', function()
+    local ok, raw = pcall(getclipboard)
+    if not ok or type(raw) ~= 'string' or raw == '' then
+        Library:Notify('Clipboard is empty or unreadable.'); return
+    end
+    local hs = game:GetService('HttpService')
+    local ok2, data = pcall(function() return hs:JSONDecode(raw) end)
+    if not ok2 or type(data) ~= 'table' then
+        Library:Notify('Not a valid config string.'); return
+    end
+    local applied = 0
+    for k, v in pairs(data) do
+        if type(k) == 'string' then
+            local isToggle = k:sub(1, 4) == '__t_'
+            if isToggle then
+                local flag = k:sub(5)
+                local ctrl = Toggles[flag]
+                if ctrl and type(v) == 'boolean' then
+                    pcall(function() ctrl:SetValue(v) end); applied += 1
+                end
+            else
+                local ctrl = Options[k]
+                if ctrl then
+                    pcall(function() ctrl:SetValue(v) end); applied += 1
+                end
+            end
+        end
+    end
+    Library:Notify(string.format('Imported %d settings.', applied))
+end)
+-- ────────────────────────────────────────────────────────────────────────────
 
 -- Addons:
 -- SaveManager (Allows you to have a configuration system)
