@@ -1181,9 +1181,12 @@ local function addSubtabs(name, pages)
     end
     local firstFrame = groupFrame(pages[1].Groups[1])
     local mainFrame = firstFrame.Parent.Parent
-    local bar = Library:Create('Frame', {
-        Name = name .. 'Subtabs', BackgroundTransparency = 1,
+    -- Scrollable so a long sub-tab row can be dragged sideways instead of being cut off.
+    local bar = Library:Create('ScrollingFrame', {
+        Name = name .. 'Subtabs', BackgroundTransparency = 1, BorderSizePixel = 0,
         Position = UDim2.fromOffset(7, 4), Size = UDim2.new(1, -14, 0, 28),
+        CanvasSize = UDim2.new(0, 0, 0, 0), AutomaticCanvasSize = Enum.AutomaticSize.X,
+        ScrollingDirection = Enum.ScrollingDirection.X, ScrollBarThickness = 3,
         ZIndex = 3, Parent = mainFrame,
     })
     Library:Create('UIListLayout', {
@@ -1191,6 +1194,15 @@ local function addSubtabs(name, pages)
         SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 4),
         Parent = bar,
     })
+    local hoveringBar = false
+    bar.MouseEnter:Connect(function() hoveringBar = true end)
+    bar.MouseLeave:Connect(function() hoveringBar = false end)
+    Library:GiveSignal(game:GetService('UserInputService').InputChanged:Connect(function(input)
+        if hoveringBar and input.UserInputType == Enum.UserInputType.MouseWheel then
+            local maxX = math.max(0, bar.AbsoluteCanvasSize.X - bar.AbsoluteSize.X)
+            bar.CanvasPosition = Vector2.new(math.clamp(bar.CanvasPosition.X - input.Position.Z * 40, 0, maxX), 0)
+        end
+    end))
     local divider = Library:Create('Frame', {
         Name = 'SubtabDivider', BackgroundColor3 = Library.OutlineColor,
         BorderSizePixel = 0, Position = UDim2.fromOffset(7, 32),
@@ -2638,81 +2650,15 @@ NpcPerfGroup:AddButton('ESP Diagnostics', function()
         'Actors: %d | ESP objs: %d | Errors: %d', actors, objs, errs))
 end)
 
--- ── Vehicle ESP + NVG (own sub-tabs) ─────────────────────────────────────────
+-- ── Vehicle ESP (own sub-tab) ─────────────────────────────────────────
 local MiscVisual = {
     vehicleService = nil,
     vehicleResolveAt = 0,
     vehicleDrawings = {},
     vehicleErr = false,
-    nvgEnforced = false,
-    nvgNextEnforce = 0,
 }
 
 local VehicleEspPage = visualPage('Vehicles')
-local NvgVisualPage = visualPage('NVG')
-
-local function nvgGuis()
-    local found = {}
-    local player = game:GetService('Players').LocalPlayer
-    local playerGui = player and player:FindFirstChild('PlayerGui')
-    if not playerGui then return found end
-    for _, gui in ipairs(playerGui:GetChildren()) do
-        if gui:IsA('ScreenGui') and gui.Name == 'NVGInterface' then
-            found[#found + 1] = gui
-        end
-    end
-    return found
-end
-
--- Enabled is toggled, never destroyed, so the game can still show it again.
-local function setNvgOverlayHidden(hidden)
-    for _, gui in ipairs(nvgGuis()) do
-        gui.Enabled = not hidden
-    end
-end
-
-local function applyNvgOverlay()
-    local hidden = Toggles.nvg_hide_overlay and Toggles.nvg_hide_overlay.Value or false
-    if hidden then
-        MiscVisual.nvgEnforced = true
-        setNvgOverlayHidden(true)
-    elseif MiscVisual.nvgEnforced then
-        MiscVisual.nvgEnforced = false
-        setNvgOverlayHidden(false)
-    end
-end
-
--- Keeps the overlay hidden while the user has it on, in case the game recreates NVGInterface.
-table.insert(Combat.connections, AimRunService.Heartbeat:Connect(function()
-    if not MiscVisual.nvgEnforced then return end
-    local now = os.clock()
-    if now < MiscVisual.nvgNextEnforce then return end
-    MiscVisual.nvgNextEnforce = now + 0.25
-    pcall(setNvgOverlayHidden, true)
-end))
-
--- Monochrome + tint: desaturating first is what lets the colour actually change.
--- A multiplicative tint alone can only darken a green image.
-local function applyNvgTint()
-    local Lighting = game:GetService('Lighting')
-    local on = Toggles.nvg_tint and Toggles.nvg_tint.Value or false
-    local effect = Lighting:FindFirstChild('BRM5_NVG_TINT')
-    if not on then
-        if effect then effect:Destroy() end
-        return
-    end
-    if not effect then
-        effect = Instance.new('ColorCorrectionEffect')
-        effect.Name = 'BRM5_NVG_TINT'
-        effect.Parent = Lighting
-    end
-    local color = Options.nvg_tint_color and Options.nvg_tint_color.Value or Color3.fromRGB(170, 60, 255)
-    effect.Saturation = -1
-    effect.Contrast = 0.25
-    effect.Brightness = 0.1
-    effect.TintColor = color
-end
-
 local function getVehicleService()
     if MiscVisual.vehicleService then return MiscVisual.vehicleService end
     if os.clock() < MiscVisual.vehicleResolveAt then return nil end
@@ -2837,16 +2783,6 @@ VehicleTextSec:AddToggle({ Text = 'Health (Hull %)', Flag = 'vehicle_hp', Defaul
 VehicleTextSec:AddColorPicker({ Text = 'Text Color', Flag = 'vehicle_text_color',
     Default = Color3.new(1, 1, 1), Callback = function() end })
 
--- NVG page
-local NvgOverlaySec = NvgVisualPage:AddSection({ Title = 'Overlay', Side = 'Left' })
-NvgOverlaySec:AddToggle({ Text = 'Hide NVG Overlay', Flag = 'nvg_hide_overlay', Default = false,
-    Callback = function() applyNvgOverlay() end })
-
-local NvgTintSec = NvgVisualPage:AddSection({ Title = 'Tint', Side = 'Right' })
-NvgTintSec:AddToggle({ Text = 'Tint Enabled', Flag = 'nvg_tint', Default = false,
-    Callback = function() applyNvgTint() end })
-NvgTintSec:AddColorPicker({ Text = 'Tint Color', Flag = 'nvg_tint_color',
-    Default = Color3.fromRGB(170, 60, 255), Callback = function() applyNvgTint() end })
 -- ────────────────────────────────────────────────────────────────────────────
 
 local PlayerGeneral=PlayersPage:AddSection({Title="General",Side="Left"})
@@ -4473,7 +4409,7 @@ do
     local X: {[string]: any}={classes={},nextScan=0,saved={},active=true}
     local V: {[string]: any}={Speed=false,SpeedValue=80,Stability=false,FastStart=false,Fly=false,FlySpeed=60,Noclip=false,Bounce=false,bounceStates=setmetatable({},{__mode="k"}),keyState={}}
     local T={RPM=false,RPMValue=900,NoSpread=false,NoRecoil=false}
-    local A: {[string]: any}={Headshot=false,Reach=false,Distance=8,Aura=false,Targets={Zombies=true,NPCs=true},keyState={},nextSwing=0,nextTargetScan=0}
+    local A: {[string]: any}={Headshot=false,FastSwing=false,SwingSpeed=2,Reach=false,Distance=8,Aura=false,Targets={Zombies=true,NPCs=true},keyState={},nextSwing=0,nextTargetScan=0}
     Combat.Extensions=X;Combat.Vehicle=V;Combat.Turret=T;Combat.Melee=A
     Gun.RPM=false;Gun.RPMValue=900
     Gun.NoCameraShake=false;Gun.SightZoom=false;Gun.Zoom=2;Gun.NoEquipDelay=false;Gun.Debug=false
@@ -4521,6 +4457,8 @@ do
     local ml=mp:AddSection({Title="Melee",Side="Left"})
     local mr=mp:AddSection({Title="Melee Aura",Side="Right"})
     toggle(ml,"Melee Force Headshot",A,"Headshot","melee_force_headshot")
+    toggle(ml,"Fast Swing",A,"FastSwing","melee_fast_swing")
+    slider(ml,"Swing Speed",A,"SwingSpeed","melee_swing_speed",1,5,2,.1,"x")
     toggle(ml,"Extended Reach",A,"Reach","melee_extended_reach")
     slider(ml,"Reach Distance",A,"Distance","melee_reach_distance",0,20,8,.5," studs")
     toggle(mr,"Melee Aura",A,"Aura","melee_kill_aura")
@@ -5238,6 +5176,18 @@ do
         end
         if w and not w._firearm and type(w._distance)=="number" then
             field(w,"_distance",A.Reach,A.Distance)
+            -- Fast swing: scale the swing cadence (_timer) and Slash->Impact gap (_delay) together.
+            -- field() keeps the original values, so turning it off restores them exactly.
+            if A.FastSwing and type(w._timer)=="number" and type(w._delay)=="number" then
+                local savedW=X.saved[w]
+                local baseTimer=savedW and savedW._timer and savedW._timer.value or w._timer
+                local baseDelay=savedW and savedW._delay and savedW._delay.value or w._delay
+                field(w,"_timer",true,math.max(.05,baseTimer/A.SwingSpeed))
+                field(w,"_delay",true,math.max(.05,baseDelay/A.SwingSpeed))
+            else
+                field(w,"_timer",false)
+                field(w,"_delay",false)
+            end
             if A.auraActive and A.class and me and not me.Locked and not me.Sprinting then
                 if os.clock()>=A.nextTargetScan then
                     A.nextTargetScan=os.clock()+.05
