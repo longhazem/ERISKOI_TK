@@ -1276,7 +1276,7 @@ addToggle(RageChecks, 'rage_distancecheck', 'Distance Check', Rage, 'DistanceChe
 addSlider(RageChecks, 'rage_distance', 'Max Distance', Rage, 'MaxDistance', 1, 5000, 0, ' studs')
 
 addSubtabs('Main', {
-    { Name = 'Silent Aim', Groups = { SilentGroup, PredictionGroup, ChecksGroup } },
+    { Name = 'Silent Aim', Groups = { SilentGroup, AimLockGroup, PredictionGroup, ChecksGroup } },
     { Name = 'Triggerbot', Groups = { TriggerGroup } },
 })
 addSubtabs('Ragebot', {
@@ -2638,15 +2638,18 @@ NpcPerfGroup:AddButton('ESP Diagnostics', function()
         'Actors: %d | ESP objs: %d | Errors: %d', actors, objs, errs))
 end)
 
--- ── Game NVG Overlay + Vehicle ESP ───────────────────────────────────────────
+-- ── Vehicle ESP + NVG (own sub-tabs) ─────────────────────────────────────────
 local MiscVisual = {
-    nvgOverride = false,
-    nvgOriginal = setmetatable({}, {__mode = 'k'}),
-    nvgNextApply = 0,
     vehicleService = nil,
     vehicleResolveAt = 0,
     vehicleDrawings = {},
+    vehicleErr = false,
+    nvgEnforced = false,
+    nvgNextEnforce = 0,
 }
+
+local VehicleEspPage = visualPage('Vehicles')
+local NvgVisualPage = visualPage('NVG')
 
 local function nvgGuis()
     local found = {}
@@ -2661,33 +2664,54 @@ local function nvgGuis()
     return found
 end
 
-local function applyNvgOverlay()
-    local on = Toggles.nvg_overlay and Toggles.nvg_overlay.Value or false
-    local tint = Options.nvg_tint and Options.nvg_tint.Value
+-- Enabled is toggled, never destroyed, so the game can still show it again.
+local function setNvgOverlayHidden(hidden)
     for _, gui in ipairs(nvgGuis()) do
-        gui.Enabled = on
-        if on and tint then
-            for _, d in ipairs(gui:GetDescendants()) do
-                if d:IsA('ImageLabel') then
-                    if MiscVisual.nvgOriginal[d] == nil then
-                        MiscVisual.nvgOriginal[d] = d.ImageColor3
-                    end
-                    d.ImageColor3 = tint
-                end
-            end
-        end
+        gui.Enabled = not hidden
     end
 end
 
--- Re-applies the user's choice while the game recreates NVGInterface.
--- Does nothing until the user touches the NVG toggle or tint.
+local function applyNvgOverlay()
+    local hidden = Toggles.nvg_hide_overlay and Toggles.nvg_hide_overlay.Value or false
+    if hidden then
+        MiscVisual.nvgEnforced = true
+        setNvgOverlayHidden(true)
+    elseif MiscVisual.nvgEnforced then
+        MiscVisual.nvgEnforced = false
+        setNvgOverlayHidden(false)
+    end
+end
+
+-- Keeps the overlay hidden while the user has it on, in case the game recreates NVGInterface.
 table.insert(Combat.connections, AimRunService.Heartbeat:Connect(function()
-    if not MiscVisual.nvgOverride then return end
+    if not MiscVisual.nvgEnforced then return end
     local now = os.clock()
-    if now < MiscVisual.nvgNextApply then return end
-    MiscVisual.nvgNextApply = now + 0.5
-    pcall(applyNvgOverlay)
+    if now < MiscVisual.nvgNextEnforce then return end
+    MiscVisual.nvgNextEnforce = now + 0.25
+    pcall(setNvgOverlayHidden, true)
 end))
+
+-- Monochrome + tint: desaturating first is what lets the colour actually change.
+-- A multiplicative tint alone can only darken a green image.
+local function applyNvgTint()
+    local Lighting = game:GetService('Lighting')
+    local on = Toggles.nvg_tint and Toggles.nvg_tint.Value or false
+    local effect = Lighting:FindFirstChild('BRM5_NVG_TINT')
+    if not on then
+        if effect then effect:Destroy() end
+        return
+    end
+    if not effect then
+        effect = Instance.new('ColorCorrectionEffect')
+        effect.Name = 'BRM5_NVG_TINT'
+        effect.Parent = Lighting
+    end
+    local color = Options.nvg_tint_color and Options.nvg_tint_color.Value or Color3.fromRGB(170, 60, 255)
+    effect.Saturation = -1
+    effect.Contrast = 0.25
+    effect.Brightness = 0.1
+    effect.TintColor = color
+end
 
 local function getVehicleService()
     if MiscVisual.vehicleService then return MiscVisual.vehicleService end
@@ -2711,22 +2735,26 @@ local function vehicleDrawingSet(uid)
     set = { box = Drawing.new('Square'), label = Drawing.new('Text') }
     set.box.Thickness = 1
     set.box.Filled = false
-    set.box.Color = Color3.fromRGB(255, 170, 0)
     set.box.Visible = false
     set.label.Size = 13
     set.label.Center = true
     set.label.Outline = true
-    set.label.Color = Color3.new(1, 1, 1)
     set.label.Visible = false
     MiscVisual.vehicleDrawings[uid] = set
     return set
 end
 
 local function renderVehicleEsp()
-    local enabled = Toggles.vehicle_esp and Toggles.vehicle_esp.Value
+    local enabled = Toggles.vehicle_enabled and Toggles.vehicle_enabled.Value or false
     local vs = enabled and getVehicleService() or nil
     local cam = workspace.CurrentCamera
-    local maxDist = Options.vehicle_esp_dist and Options.vehicle_esp_dist.Value or 1500
+    local maxDist = Options.vehicle_max_distance and Options.vehicle_max_distance.Value or 1500
+    local showBox = Toggles.vehicle_box and Toggles.vehicle_box.Value or false
+    local showName = Toggles.vehicle_name and Toggles.vehicle_name.Value or false
+    local showDist = Toggles.vehicle_distance and Toggles.vehicle_distance.Value or false
+    local showHp = Toggles.vehicle_hp and Toggles.vehicle_hp.Value or false
+    local boxColor = Options.vehicle_box_color and Options.vehicle_box_color.Value or Color3.fromRGB(255, 170, 0)
+    local textColor = Options.vehicle_text_color and Options.vehicle_text_color.Value or Color3.new(1, 1, 1)
     local vehicles = vs and vs.Vehicles or {}
     local seen = {}
 
@@ -2742,20 +2770,26 @@ local function renderVehicleEsp()
                     seen[uid] = true
                     local set = vehicleDrawingSet(uid)
                     local size = math.clamp(2400 / math.max(dist, 1), 12, 300)
+
+                    set.box.Color = boxColor
                     set.box.Size = Vector2.new(size, size * 0.6)
                     set.box.Position = Vector2.new(screen.X - size / 2, screen.Y - size * 0.3)
-                    set.box.Visible = true
+                    set.box.Visible = showBox
 
-                    local hp = ''
-                    local hull = v.Healths and v.Healths.Hull
-                    local maxHull = v.MaxHealths and v.MaxHealths.Hull
-                    if type(hull) == 'number' and type(maxHull) == 'number' and maxHull > 0 then
-                        hp = string.format(' | HP %d%%', math.floor(hull / maxHull * 100))
+                    local parts = {}
+                    if showName then parts[#parts + 1] = tostring(v._vehicleName or 'Vehicle') end
+                    if showDist then parts[#parts + 1] = string.format('[%dm]', math.floor(dist)) end
+                    if showHp then
+                        local hull = v.Healths and v.Healths.Hull
+                        local maxHull = v.MaxHealths and v.MaxHealths.Hull
+                        if type(hull) == 'number' and type(maxHull) == 'number' and maxHull > 0 then
+                            parts[#parts + 1] = string.format('HP %d%%', math.floor(hull / maxHull * 100))
+                        end
                     end
-                    set.label.Text = string.format('%s [%dm]%s',
-                        tostring(v._vehicleName or 'Vehicle'), math.floor(dist), hp)
+                    set.label.Color = textColor
+                    set.label.Text = table.concat(parts, ' ')
                     set.label.Position = Vector2.new(screen.X, screen.Y - size * 0.3 - 14)
-                    set.label.Visible = true
+                    set.label.Visible = #parts > 0
                 end
             end
         end
@@ -2785,27 +2819,34 @@ table.insert(Combat.connections, AimRunService.RenderStepped:Connect(function()
     end
 end))
 
-local MiscVisGroup = Tabs.Visuals:AddLeftGroupbox('Game NVG & Vehicle ESP')
-MiscVisGroup:AddToggle('nvg_overlay', { Text = 'NVG Overlay', Default = true })
-Toggles.nvg_overlay:OnChanged(function()
-    MiscVisual.nvgOverride = true
-    applyNvgOverlay()
-end)
-Toggles.nvg_overlay:AddColorPicker('nvg_tint', {
-    Default = Color3.fromRGB(130, 255, 130), Title = 'NVG Tint',
-})
-if Options.nvg_tint then
-    Options.nvg_tint:OnChanged(function()
-        MiscVisual.nvgOverride = true
-        applyNvgOverlay()
-    end)
-end
+-- Vehicles page
+local VehicleMainSec = VehicleEspPage:AddSection({ Title = 'Vehicle ESP', Side = 'Left' })
+VehicleMainSec:AddToggle({ Text = 'Enabled', Flag = 'vehicle_enabled', Default = false, Callback = function() end })
+VehicleMainSec:AddSlider({ Text = 'Max Distance', Flag = 'vehicle_max_distance', Default = 1500,
+    Min = 100, Max = 3000, Rounding = 0, Suffix = ' m', Callback = function() end })
 
-MiscVisGroup:AddToggle('vehicle_esp', { Text = 'Vehicle ESP', Default = false })
-MiscVisGroup:AddSlider('vehicle_esp_dist', {
-    Text = 'Max Distance', Min = 100, Max = 3000, Default = 1500,
-    Rounding = 0, Suffix = ' m',
-})
+local VehicleBoxSec = VehicleEspPage:AddSection({ Title = 'Box', Side = 'Left' })
+VehicleBoxSec:AddToggle({ Text = 'Box', Flag = 'vehicle_box', Default = true, Callback = function() end })
+VehicleBoxSec:AddColorPicker({ Text = 'Box Color', Flag = 'vehicle_box_color',
+    Default = Color3.fromRGB(255, 170, 0), Callback = function() end })
+
+local VehicleTextSec = VehicleEspPage:AddSection({ Title = 'Text', Side = 'Right' })
+VehicleTextSec:AddToggle({ Text = 'Name', Flag = 'vehicle_name', Default = true, Callback = function() end })
+VehicleTextSec:AddToggle({ Text = 'Distance', Flag = 'vehicle_distance', Default = true, Callback = function() end })
+VehicleTextSec:AddToggle({ Text = 'Health (Hull %)', Flag = 'vehicle_hp', Default = true, Callback = function() end })
+VehicleTextSec:AddColorPicker({ Text = 'Text Color', Flag = 'vehicle_text_color',
+    Default = Color3.new(1, 1, 1), Callback = function() end })
+
+-- NVG page
+local NvgOverlaySec = NvgVisualPage:AddSection({ Title = 'Overlay', Side = 'Left' })
+NvgOverlaySec:AddToggle({ Text = 'Hide NVG Overlay', Flag = 'nvg_hide_overlay', Default = false,
+    Callback = function() applyNvgOverlay() end })
+
+local NvgTintSec = NvgVisualPage:AddSection({ Title = 'Tint', Side = 'Right' })
+NvgTintSec:AddToggle({ Text = 'Tint Enabled', Flag = 'nvg_tint', Default = false,
+    Callback = function() applyNvgTint() end })
+NvgTintSec:AddColorPicker({ Text = 'Tint Color', Flag = 'nvg_tint_color',
+    Default = Color3.fromRGB(170, 60, 255), Callback = function() applyNvgTint() end })
 -- ────────────────────────────────────────────────────────────────────────────
 
 local PlayerGeneral=PlayersPage:AddSection({Title="General",Side="Left"})
