@@ -1181,12 +1181,9 @@ local function addSubtabs(name, pages)
     end
     local firstFrame = groupFrame(pages[1].Groups[1])
     local mainFrame = firstFrame.Parent.Parent
-    -- Scrollable so a long sub-tab row can be dragged sideways instead of being cut off.
-    local bar = Library:Create('ScrollingFrame', {
-        Name = name .. 'Subtabs', BackgroundTransparency = 1, BorderSizePixel = 0,
+    local bar = Library:Create('Frame', {
+        Name = name .. 'Subtabs', BackgroundTransparency = 1,
         Position = UDim2.fromOffset(7, 4), Size = UDim2.new(1, -14, 0, 28),
-        CanvasSize = UDim2.new(0, 0, 0, 0), AutomaticCanvasSize = Enum.AutomaticSize.X,
-        ScrollingDirection = Enum.ScrollingDirection.X, ScrollBarThickness = 3,
         ZIndex = 3, Parent = mainFrame,
     })
     Library:Create('UIListLayout', {
@@ -1194,15 +1191,6 @@ local function addSubtabs(name, pages)
         SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 4),
         Parent = bar,
     })
-    local hoveringBar = false
-    bar.MouseEnter:Connect(function() hoveringBar = true end)
-    bar.MouseLeave:Connect(function() hoveringBar = false end)
-    Library:GiveSignal(game:GetService('UserInputService').InputChanged:Connect(function(input)
-        if hoveringBar and input.UserInputType == Enum.UserInputType.MouseWheel then
-            local maxX = math.max(0, bar.AbsoluteCanvasSize.X - bar.AbsoluteSize.X)
-            bar.CanvasPosition = Vector2.new(math.clamp(bar.CanvasPosition.X - input.Position.Z * 40, 0, maxX), 0)
-        end
-    end))
     local divider = Library:Create('Frame', {
         Name = 'SubtabDivider', BackgroundColor3 = Library.OutlineColor,
         BorderSizePixel = 0, Position = UDim2.fromOffset(7, 32),
