@@ -4481,7 +4481,7 @@ do
         maxPerCycle = 12,
         cooldown    = 0.15,
         headYOffset = 1.5,
-        range       = 8,        -- MTC Melee.lua: max real Reach = 7 (Tomahawk). Server likely
+        range       = 6,        -- stays put, hits only what is in reach. MTC Melee.lua: max real Reach = 7 (Tomahawk). Server likely
                                  -- validates Impact distance against this — stay close to it.
         impactDelay = 0.3,      -- MTC Melee.lua: real Slash→Impact gap is 0.25-0.3s (MeleeInventory._use).
                                  -- Firing both same-frame (old behavior) looks server-impossible.
@@ -4605,16 +4605,29 @@ do
         if not ok then AK2._net = nil end
     end
 
+    -- CharacterController.lua (the "charactercontrollable.lua" controller):Teleport sets
+    -- Position/SimulatedPosition/CFrame/ForceNextPosition/_position together in one call,
+    -- and skips the only guard (TeleportRevision check) when no revision is passed.
+    -- Spoofing ForceNextPosition alone never moved actor.CFrame (ActorClass.Update lerps
+    -- CFrame from SimulatedPosition, which CharacterController.Update keeps rewriting from
+    -- its own ctrl._position every frame) -- that's why the character stood still.
+    local function AK2_teleport(pos)
+        local svc = Combat.Service()
+        local actor = svc and svc.Replicator and svc.Replicator.LocalActor
+        local ctrl = Combat.Movement and Combat.Movement.currentController
+        if not (ctrl and actor and ctrl._localActor == actor and typeof(ctrl.Teleport) == "function") then return false end
+        local rot = typeof(actor.CFrame) == "CFrame" and actor.CFrame.Rotation or CFrame.new()
+        local ok = pcall(function() ctrl:Teleport(CFrame.new(pos) * rot, true) end)
+        return ok
+    end
+
     table.insert(Combat.connections, AimRunService.Heartbeat:Connect(function()
         local tp = AK2._tp
         if tp then
             if not AK2.enabled or tick() >= tp.untilT then
-                if tp.actor.ForceNextPosition == tp.pos then tp.actor.ForceNextPosition = nil end
+                AK2_teleport(tp.origPos)
                 AK2._tp = nil
                 tp = nil
-            else
-                -- MTC Update consumes ForceNextPosition on each 0.1s replicate, so re-assert every frame.
-                tp.actor.ForceNextPosition = tp.pos
             end
         end
         if not AK2.enabled then return end
@@ -4649,8 +4662,9 @@ do
                 local away = Vector3.new(myPos.X - pos.X, 0, myPos.Z - pos.Z)
                 local dir = away.Magnitude > 0 and away.Unit or Vector3.new(0, 0, 0)
                 local tpPos = Vector3.new(pos.X + dir.X * AK2.tpStandoff, myPos.Y, pos.Z + dir.Z * AK2.tpStandoff)
-                AK2._tp = { actor = myActor, pos = tpPos, untilT = now + AK2.impactDelay + 0.15 }
-                myActor.ForceNextPosition = tpPos
+                if AK2_teleport(tpPos) then
+                    AK2._tp = { origPos = myPos, untilT = now + AK2.impactDelay + 0.15 }
+                end
             end
             AK2_fire(net, "InventoryAction", "Slash", slashArg)
             -- MTC MeleeInventory._use: real client waits `_delay` (0.25-0.3s) after Slash
@@ -4696,7 +4710,7 @@ do
         Min=0.5,Max=2.5,Default=1.5,Rounding=0.05,Suffix=" st",
         Callback=function(v) AK2.headYOffset=math.clamp(v,0.5,2.5) end})
     ak2l:AddSlider({Text="Range",Flag="ak2_range",
-        Min=5,Max=30,Default=8,Rounding=1,Suffix=" st",
+        Min=5,Max=30,Default=6,Rounding=1,Suffix=" st",
         Callback=function(v) AK2.range=math.clamp(v,5,30) end})
     ak2l:AddSlider({Text="Impact Delay",Flag="ak2_impact_delay",
         Min=0,Max=1,Default=0.3,Rounding=0.05,Suffix=" s",
@@ -4705,6 +4719,134 @@ do
         AK2._net=nil; AK2._remote=nil; AK2._netRetry=0
         task.spawn(function() AK2_findNet(); AK2_getRemote() end)
     end})
+
+    -- ── Aura Kill V3 ─────────────────────────────────────────────────────────
+    -- Same engine as V2 (AK2_findNet/AK2_fire/AK2_teleport are shared, not AK2-only).
+    -- Difference: range check + hit position read the TARGET's ServerPosition first.
+    -- ActorClass.Replicate (MTC) writes SimulatedPosition = client-reported pos and
+    -- ServerPosition = the server's own authoritative pos; ReplicatorService.GetActorPosition
+    -- and the spotted/hit logic both read ServerPosition for anyone that isn't UseClient
+    -- (i.e. every target). a.Position can lag/interpolate on fast movers -- ServerPosition
+    -- is the raw figure the server itself believes, so targeting off it is more honest
+    -- about what will actually register as in range.
+    local AK3: {[string]: any} = {
+        enabled     = false,
+        killAI      = true,
+        killZombie  = true,
+        killPlayer  = false,
+        hitPart     = "Head",
+        maxPerCycle = 12,
+        cooldown    = 0.15,
+        headYOffset = 1.5,
+        range       = 6,
+        impactDelay = 0.3,
+        killTp      = false,
+        tpStandoff  = 2,
+        tpRange     = 30,
+        _tp         = nil,      -- { origPos, untilT }
+        _lastFire   = {},
+    }
+    Combat.AK3 = AK3
+
+    local function AK3_targetPos(a)
+        local sp = a.ServerPosition
+        if typeof(sp) == "Vector3" then return sp end
+        local p = a.Position
+        if typeof(p) == "Vector3" then return p end
+        return nil
+    end
+
+    table.insert(Combat.connections, AimRunService.Heartbeat:Connect(function()
+        local tp = AK3._tp
+        if tp then
+            if not AK3.enabled or tick() >= tp.untilT then
+                AK2_teleport(tp.origPos)
+                AK3._tp = nil
+                tp = nil
+            end
+        end
+        if not AK3.enabled then return end
+        local net = AK2_findNet()
+        if not net then return end
+        local svc = Combat.Service()
+        local registry = svc and svc.Replicator and svc.Replicator.Actors
+        if not registry then return end
+        local now = tick(); local count = 0
+        local myActor = svc and svc.Replicator and svc.Replicator.LocalActor
+        local myPos = myActor and typeof(myActor.Position)=="Vector3" and myActor.Position
+        if tp then return end
+        for uid, a in pairs(registry) do
+            if count >= AK3.maxPerCycle then break end
+            if not Combat.IsAlive(a) then continue end
+            local kind = Combat.Kind(a)
+            if not kind then continue end
+            local allow = false
+            if kind == "Zombies" and AK3.killZombie then allow = true end
+            if kind == "NPCs"    and AK3.killAI     then allow = true end
+            if kind == "Players" and AK3.killPlayer then allow = true end
+            if not allow then continue end
+            if (now - (AK3._lastFire[uid] or 0)) < AK3.cooldown then continue end
+            local pos = AK3_targetPos(a)
+            if not pos then continue end
+            if myPos and (pos - myPos).Magnitude > (AK3.killTp and AK3.tpRange or AK3.range) then continue end
+            AK3._lastFire[uid] = now
+            local hitPos = { pos.X, pos.Y + AK3.headYOffset, pos.Z }
+            local slashArg = math.random(1, 3)
+            if AK3.killTp and myActor and myPos then
+                local away = Vector3.new(myPos.X - pos.X, 0, myPos.Z - pos.Z)
+                local dir = away.Magnitude > 0 and away.Unit or Vector3.new(0, 0, 0)
+                local tpPos = Vector3.new(pos.X + dir.X * AK3.tpStandoff, myPos.Y, pos.Z + dir.Z * AK3.tpStandoff)
+                if AK2_teleport(tpPos) then
+                    AK3._tp = { origPos = myPos, untilT = now + AK3.impactDelay + 0.15 }
+                end
+            end
+            AK2_fire(net, "InventoryAction", "Slash", slashArg)
+            task.delay(AK3.impactDelay, function()
+                if not AK3.enabled then return end
+                local n = AK2_findNet(); if not n then return end
+                AK2_fire(n, "InventoryAction", "Impact", hitPos, uid, AK3.hitPart)
+            end)
+            count = count + 1
+            if AK3._tp then break end
+        end
+    end))
+
+    local ak3l = mp:AddSection({Title="Aura Kill V3",Side="Right"})
+    ak3l:AddToggle({Text="Enable",Flag="ak3_enabled",Default=false,
+        Callback=function(v) AK3.enabled=v end})
+    ak3l:AddToggle({Text="Kill NPCs",Flag="ak3_kill_ai",Default=true,
+        Callback=function(v) AK3.killAI=v end})
+    ak3l:AddToggle({Text="Kill Zombies",Flag="ak3_kill_zombie",Default=true,
+        Callback=function(v) AK3.killZombie=v end})
+    ak3l:AddToggle({Text="Kill Players",Flag="ak3_kill_player",Default=false,
+        Callback=function(v) AK3.killPlayer=v end})
+    ak3l:AddDropdown({Text="Hit Part",Flag="ak3_hitpart",
+        Options={"Head","UpperTorso","LowerTorso","LeftUpperArm","RightUpperArm","LeftUpperLeg","RightUpperLeg"},
+        Default="Head",
+        Callback=function(v) AK3.hitPart=v end})
+    ak3l:AddSlider({Text="Max Targets/Tick",Flag="ak3_max_targets",
+        Min=1,Max=30,Default=12,Rounding=1,Suffix="",
+        Callback=function(v) AK3.maxPerCycle=math.clamp(v,1,30) end})
+    ak3l:AddSlider({Text="Hit Cooldown",Flag="ak3_cooldown",
+        Min=0.05,Max=2.0,Default=0.15,Rounding=0.05,Suffix=" s",
+        Callback=function(v) AK3.cooldown=math.clamp(v,0.05,2.0) end})
+    ak3l:AddToggle({Text="Kill TP (teleport, kill, return)",Flag="ak3_kill_tp",Default=false,
+        Callback=function(v) AK3.killTp=v end})
+    ak3l:AddSlider({Text="TP Standoff",Flag="ak3_tp_standoff",
+        Min=1,Max=5,Default=2,Rounding=0.5,Suffix=" st",
+        Callback=function(v) AK3.tpStandoff=math.clamp(v,1,5) end})
+    ak3l:AddSlider({Text="TP Range",Flag="ak3_tp_range",
+        Min=5,Max=1000,Default=30,Rounding=1,Suffix=" st",
+        Callback=function(v) AK3.tpRange=math.clamp(v,5,1000) end})
+    ak3l:AddSlider({Text="Head Y Offset",Flag="ak3_head_y_offset",
+        Min=0.5,Max=2.5,Default=1.5,Rounding=0.05,Suffix=" st",
+        Callback=function(v) AK3.headYOffset=math.clamp(v,0.5,2.5) end})
+    ak3l:AddSlider({Text="Range",Flag="ak3_range",
+        Min=5,Max=30,Default=6,Rounding=1,Suffix=" st",
+        Callback=function(v) AK3.range=math.clamp(v,5,30) end})
+    ak3l:AddSlider({Text="Impact Delay",Flag="ak3_impact_delay",
+        Min=0,Max=1,Default=0.3,Rounding=0.05,Suffix=" s",
+        Callback=function(v) AK3.impactDelay=math.clamp(v,0,1) end})
 
 
     local vp=VehiclePage
@@ -5336,8 +5478,12 @@ do
         for object in pairs(X.saved) do restore(object) end
         restoreAttachmentColors()
         if AK2._tp then
-            if AK2._tp.actor.ForceNextPosition == AK2._tp.pos then AK2._tp.actor.ForceNextPosition = nil end
+            AK2_teleport(AK2._tp.origPos)
             AK2._tp = nil
+        end
+        if AK3._tp then
+            AK2_teleport(AK3._tp.origPos)
+            AK3._tp = nil
         end
         if X.hud then X.hud:Destroy() end
         oldDestroy()
