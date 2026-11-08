@@ -4485,6 +4485,10 @@ do
                                  -- validates Impact distance against this — stay close to it.
         impactDelay = 0.3,      -- MTC Melee.lua: real Slash→Impact gap is 0.25-0.3s (MeleeInventory._use).
                                  -- Firing both same-frame (old behavior) looks server-impossible.
+        killTp      = false,
+        tpStandoff  = 2,        -- studs from target the player stands while the hit lands
+        tpRange     = 30,       -- max distance to a target Kill TP will teleport to
+        _tp         = nil,      -- active teleport window: { actor, pos, untilT }
         _lastFire   = {},
         _net        = nil,
         _remote     = nil,
@@ -4602,6 +4606,17 @@ do
     end
 
     table.insert(Combat.connections, AimRunService.Heartbeat:Connect(function()
+        local tp = AK2._tp
+        if tp then
+            if not AK2.enabled or tick() >= tp.untilT then
+                if tp.actor.ForceNextPosition == tp.pos then tp.actor.ForceNextPosition = nil end
+                AK2._tp = nil
+                tp = nil
+            else
+                -- MTC Update consumes ForceNextPosition on each 0.1s replicate, so re-assert every frame.
+                tp.actor.ForceNextPosition = tp.pos
+            end
+        end
         if not AK2.enabled then return end
         local net = AK2_findNet()
         if not net then return end
@@ -4611,6 +4626,7 @@ do
         local now = tick(); local count = 0
         local myActor = svc and svc.Replicator and svc.Replicator.LocalActor
         local myPos = myActor and typeof(myActor.Position)=="Vector3" and myActor.Position
+        if tp then return end
         for uid, a in pairs(registry) do
             if count >= AK2.maxPerCycle then break end
             if not Combat.IsAlive(a) then continue end
@@ -4624,10 +4640,18 @@ do
             if (now - (AK2._lastFire[uid] or 0)) < AK2.cooldown then continue end
             local pos = a.Position
             if typeof(pos) ~= "Vector3" then continue end
-            if myPos and (pos - myPos).Magnitude > AK2.range then continue end
+            if myPos and (pos - myPos).Magnitude > (AK2.killTp and AK2.tpRange or AK2.range) then continue end
             AK2._lastFire[uid] = now
             local hitPos = { pos.X, pos.Y + AK2.headYOffset, pos.Z }
             local slashArg = math.random(1, 3)
+            if AK2.killTp and myActor and myPos then
+                -- Stand between the target and the spot we came from, on our own ground height.
+                local away = Vector3.new(myPos.X - pos.X, 0, myPos.Z - pos.Z)
+                local dir = away.Magnitude > 0 and away.Unit or Vector3.new(0, 0, 0)
+                local tpPos = Vector3.new(pos.X + dir.X * AK2.tpStandoff, myPos.Y, pos.Z + dir.Z * AK2.tpStandoff)
+                AK2._tp = { actor = myActor, pos = tpPos, untilT = now + AK2.impactDelay + 0.15 }
+                myActor.ForceNextPosition = tpPos
+            end
             AK2_fire(net, "InventoryAction", "Slash", slashArg)
             -- MTC MeleeInventory._use: real client waits `_delay` (0.25-0.3s) after Slash
             -- before raycasting + firing Impact. Matching that timing, not same-frame.
@@ -4637,6 +4661,7 @@ do
                 AK2_fire(n, "InventoryAction", "Impact", hitPos, uid, AK2.hitPart)
             end)
             count = count + 1
+            if AK2._tp then break end
         end
     end))
 
@@ -4659,6 +4684,14 @@ do
     ak2l:AddSlider({Text="Hit Cooldown",Flag="ak2_cooldown",
         Min=0.05,Max=2.0,Default=0.15,Rounding=0.05,Suffix=" s",
         Callback=function(v) AK2.cooldown=math.clamp(v,0.05,2.0) end})
+    ak2l:AddToggle({Text="Kill TP (teleport, kill, return)",Flag="ak2_kill_tp",Default=false,
+        Callback=function(v) AK2.killTp=v end})
+    ak2l:AddSlider({Text="TP Standoff",Flag="ak2_tp_standoff",
+        Min=1,Max=5,Default=2,Rounding=0.5,Suffix=" st",
+        Callback=function(v) AK2.tpStandoff=math.clamp(v,1,5) end})
+    ak2l:AddSlider({Text="TP Range",Flag="ak2_tp_range",
+        Min=5,Max=1000,Default=30,Rounding=1,Suffix=" st",
+        Callback=function(v) AK2.tpRange=math.clamp(v,5,1000) end})
     ak2l:AddSlider({Text="Head Y Offset",Flag="ak2_head_y_offset",
         Min=0.5,Max=2.5,Default=1.5,Rounding=0.05,Suffix=" st",
         Callback=function(v) AK2.headYOffset=math.clamp(v,0.5,2.5) end})
@@ -4946,20 +4979,34 @@ do
             return ctrl
         end
     end
+    -- Remember each original property the first time we touch it, so unload can put it back.
+    local attachOrig=setmetatable({},{__mode="k"})
+    local function setTint(obj,prop,value)
+        local rec=attachOrig[obj]
+        if not rec then rec={};attachOrig[obj]=rec end
+        if rec[prop]==nil then rec[prop]=obj[prop] end
+        obj[prop]=value
+    end
+    local function restoreAttachmentColors()
+        for obj,rec in pairs(attachOrig) do
+            for prop,value in pairs(rec) do pcall(function() obj[prop]=value end) end
+        end
+        attachOrig=setmetatable({},{__mode="k"})
+    end
     local function recolorLaser(r,color)
-        if r._laser then pcall(function() r._laser.Color=ColorSequence.new(color) end) end
-        if r._trail then pcall(function() r._trail.Color=ColorSequence.new(color) end) end
-        if r._laserLight then pcall(function() r._laserLight.Color=color end) end
-        if r._laserDot then pcall(function() r._laserDot.Color3=color end) end
+        if r._laser then pcall(setTint,r._laser,"Color",ColorSequence.new(color)) end
+        if r._trail then pcall(setTint,r._trail,"Color",ColorSequence.new(color)) end
+        if r._laserLight then pcall(setTint,r._laserLight,"Color",color) end
+        if r._laserDot then pcall(setTint,r._laserDot,"Color3",color) end
     end
     local function recolorFlash(r,color)
         for _,entry in pairs(r._lightObjects or {}) do
-            if type(entry)=="table" and typeof(entry.Light)=="Instance" then entry.Light.Color=color end
+            if type(entry)=="table" and typeof(entry.Light)=="Instance" then pcall(setTint,entry.Light,"Color",color) end
         end
         for _,m in pairs(r._lightModels or {}) do
             if typeof(m)=="Instance" then
-                for _,d in ipairs(m:GetDescendants()) do if d:IsA("Light") then d.Color=color end end
-            elseif type(m)=="table" and typeof(m.Light)=="Instance" then m.Light.Color=color end
+                for _,d in ipairs(m:GetDescendants()) do if d:IsA("Light") then pcall(setTint,d,"Color",color) end end
+            elseif type(m)=="table" and typeof(m.Light)=="Instance" then pcall(setTint,m.Light,"Color",color) end
         end
     end
     installers.LaserAttachmentReplicator=function(c)
@@ -5287,6 +5334,11 @@ do
         X.active=false
         if X.autoSwing and X.meleeWeapon then X.meleeWeapon._swinging=false end
         for object in pairs(X.saved) do restore(object) end
+        restoreAttachmentColors()
+        if AK2._tp then
+            if AK2._tp.actor.ForceNextPosition == AK2._tp.pos then AK2._tp.actor.ForceNextPosition = nil end
+            AK2._tp = nil
+        end
         if X.hud then X.hud:Destroy() end
         oldDestroy()
     end
