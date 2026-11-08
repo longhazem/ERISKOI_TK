@@ -4004,6 +4004,7 @@ local GunPage = legacyPage(Tabs.Mods, modPages, 'Gun Mods')
 local TurretPage = legacyPage(Tabs.Mods, modPages, 'Turret Mods')
 local VehiclePage = legacyPage(Tabs.Mods, modPages, 'Vehicle Mods')
 local MeleePage = legacyPage(Tabs.Mods, modPages, 'Melee Mods')
+local InteractPage = legacyPage(Tabs.Mods, modPages, 'Interact Mods')
 local GunVisualsPage = GunPage
 local Gun: {[string]: any}={NoRecoil=false,InstantADS=false,NoSway=false,NoSpread=false,SpreadReduction=100,
     UnlockModes=false,AutoReload=false,ForceHeadshot=false,active=true,originals={},hooks={},nextResolve=0,
@@ -4397,6 +4398,7 @@ do
     local X: {[string]: any}={classes={},nextScan=0,saved={},active=true}
     local V: {[string]: any}={Speed=false,SpeedValue=80,Stability=false,FastStart=false,Fly=false,FlySpeed=60,Noclip=false,Bounce=false,bounceStates=setmetatable({},{__mode="k"}),keyState={}}
     local T={RPM=false,RPMValue=900,NoSpread=false,NoRecoil=false}
+    local LP: {[string]: any}={Instant=false}
     local A: {[string]: any}={Headshot=false,FastSwing=false,SwingSpeed=2,Reach=false,Distance=8,Aura=false,Targets={Zombies=true,NPCs=true},keyState={},nextSwing=0,nextTargetScan=0}
     Combat.Extensions=X;Combat.Vehicle=V;Combat.Turret=T;Combat.Melee=A
     Gun.RPM=false;Gun.RPMValue=900
@@ -4447,6 +4449,8 @@ do
     toggle(ml,"Melee Force Headshot",A,"Headshot","melee_force_headshot")
     toggle(ml,"Fast Swing",A,"FastSwing","melee_fast_swing")
     slider(ml,"Swing Speed",A,"SwingSpeed","melee_swing_speed",1,5,2,.1,"x")
+    local lockSec=InteractPage:AddSection({Title="Lockpick",Side="Left"})
+    toggle(lockSec,"Instant Lockpick",LP,"Instant","interact_instant_lockpick")
     toggle(ml,"Extended Reach",A,"Reach","melee_extended_reach")
     slider(ml,"Reach Distance",A,"Distance","melee_reach_distance",0,20,8,.5," studs")
     toggle(mr,"Melee Aura",A,"Aura","melee_kill_aura")
@@ -4922,6 +4926,21 @@ do
         end end)
     end
     installers.MeleeInventory=function(c) A.class=c end
+    installers.LockPickController=function(c)
+        local originalNew=c.new
+        c.new=function(...)
+            local ctrl=originalNew(...)
+            if LP.Instant and ctrl and not ctrl._cancelled then
+                task.defer(function()
+                    if ctrl._cancelled then return end
+                    ctrl._cancelled=true
+                    local net=AK2_findNet()
+                    if net then AK2_fire(net,"ActivateInteract","Picked") end
+                end)
+            end
+            return ctrl
+        end
+    end
     local meleeRay=RaycastParams.new()
     meleeRay.FilterType=Enum.RaycastFilterType.Exclude
     meleeRay.IgnoreWater=false
