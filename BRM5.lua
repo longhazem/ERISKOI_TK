@@ -4004,7 +4004,6 @@ local GunPage = legacyPage(Tabs.Mods, modPages, 'Gun Mods')
 local TurretPage = legacyPage(Tabs.Mods, modPages, 'Turret Mods')
 local VehiclePage = legacyPage(Tabs.Mods, modPages, 'Vehicle Mods')
 local MeleePage = legacyPage(Tabs.Mods, modPages, 'Melee Mods')
-local InteractPage = legacyPage(Tabs.Mods, modPages, 'Interact Mods')
 local GunVisualsPage = GunPage
 local Gun: {[string]: any}={NoRecoil=false,InstantADS=false,NoSway=false,NoSpread=false,SpreadReduction=100,
     UnlockModes=false,AutoReload=false,ForceHeadshot=false,active=true,originals={},hooks={},nextResolve=0,
@@ -4398,8 +4397,7 @@ do
     local X: {[string]: any}={classes={},nextScan=0,saved={},active=true}
     local V: {[string]: any}={Speed=false,SpeedValue=80,Stability=false,FastStart=false,Fly=false,FlySpeed=60,Noclip=false,Bounce=false,bounceStates=setmetatable({},{__mode="k"}),keyState={}}
     local T={RPM=false,RPMValue=900,NoSpread=false,NoRecoil=false}
-    local LP: {[string]: any}={Instant=false}
-    local A: {[string]: any}={Headshot=false,FastSwing=false,SwingSpeed=2,Reach=false,Distance=8,Aura=false,Targets={Zombies=true,NPCs=true},keyState={},nextSwing=0,nextTargetScan=0}
+    local A: {[string]: any}={Headshot=false,Reach=false,Distance=8,Aura=false,Targets={Zombies=true,NPCs=true},keyState={},nextSwing=0,nextTargetScan=0}
     Combat.Extensions=X;Combat.Vehicle=V;Combat.Turret=T;Combat.Melee=A
     Gun.RPM=false;Gun.RPMValue=900
     Gun.NoCameraShake=false;Gun.SightZoom=false;Gun.Zoom=2;Gun.NoEquipDelay=false;Gun.Debug=false
@@ -4443,14 +4441,15 @@ do
     toggle(GunHandling,"Sight Zoom",Gun,"SightZoom","gun_sight_zoom")
     slider(GunHandling,"Sight Magnification",Gun,"Zoom","gun_sight_magnification",1,10,2,.1,"x")
     toggle(GunVisualSection,"Gun Debug HUD",Gun,"Debug","gun_debug_hud")
+    local AttachColorSec=GunVisualsPage:AddSection({Title="Attachment Colors (self only)",Side="Right"})
+    AttachColorSec:AddToggle({Text="Custom Laser Color",Flag="attach_laser_on",Default=false,Callback=function() end})
+    AttachColorSec:AddColorPicker({Text="Laser Color",Flag="attach_laser_color",Default=Color3.fromRGB(255,0,0),Callback=function() end})
+    AttachColorSec:AddToggle({Text="Custom Light Color",Flag="attach_light_on",Default=false,Callback=function() end})
+    AttachColorSec:AddColorPicker({Text="Light Color",Flag="attach_light_color",Default=Color3.fromRGB(255,255,255),Callback=function() end})
     local mp=MeleePage
     local ml=mp:AddSection({Title="Melee",Side="Left"})
     local mr=mp:AddSection({Title="Melee Aura",Side="Right"})
     toggle(ml,"Melee Force Headshot",A,"Headshot","melee_force_headshot")
-    toggle(ml,"Fast Swing",A,"FastSwing","melee_fast_swing")
-    slider(ml,"Swing Speed",A,"SwingSpeed","melee_swing_speed",1,5,2,.1,"x")
-    local lockSec=InteractPage:AddSection({Title="Lockpick",Side="Left"})
-    toggle(lockSec,"Instant Lockpick",LP,"Instant","interact_instant_lockpick")
     toggle(ml,"Extended Reach",A,"Reach","melee_extended_reach")
     slider(ml,"Reach Distance",A,"Distance","melee_reach_distance",0,20,8,.5," studs")
     toggle(mr,"Melee Aura",A,"Aura","melee_kill_aura")
@@ -4926,19 +4925,54 @@ do
         end end)
     end
     installers.MeleeInventory=function(c) A.class=c end
-    installers.LockPickController=function(c)
+    local function recolorLaser(r,color)
+        if r._laser then pcall(function() r._laser.Color=ColorSequence.new(color) end) end
+        if r._trail then pcall(function() r._trail.Color=ColorSequence.new(color) end) end
+        if r._laserLight then pcall(function() r._laserLight.Color=color end) end
+        if r._laserDot then pcall(function() r._laserDot.Color3=color end) end
+    end
+    local function recolorFlash(r,color)
+        for _,entry in pairs(r._lightObjects or {}) do
+            if type(entry)=="table" and typeof(entry.Light)=="Instance" then entry.Light.Color=color end
+        end
+        for _,m in pairs(r._lightModels or {}) do
+            if typeof(m)=="Instance" then
+                for _,d in ipairs(m:GetDescendants()) do if d:IsA("Light") then d.Color=color end end
+            elseif type(m)=="table" and typeof(m.Light)=="Instance" then m.Light.Color=color end
+        end
+    end
+    installers.LaserAttachmentReplicator=function(c)
         local originalNew=c.new
         c.new=function(...)
-            local ctrl=originalNew(...)
-            if LP.Instant and ctrl and not ctrl._cancelled then
-                task.defer(function()
-                    if ctrl._cancelled then return end
-                    ctrl._cancelled=true
-                    local net=AK2_findNet()
-                    if net then AK2_fire(net,"ActivateInteract","Picked") end
-                end)
+            local owner=(...)
+            local obj=originalNew(...)
+            if obj then obj._localOwner=(owner~=nil and (owner==game:GetService("Players").LocalPlayer or owner==actor())) end
+            return obj
+        end
+        local originalUpdate=c.Update
+        c.Update=function(self,...)
+            local r=originalUpdate(self,...)
+            if self._localOwner and Toggles.attach_laser_on and Toggles.attach_laser_on.Value and Options.attach_laser_color then
+                pcall(recolorLaser,self,Options.attach_laser_color.Value)
             end
-            return ctrl
+            return r
+        end
+    end
+    installers.FlashlightAttachmentReplicator=function(c)
+        local originalNew=c.new
+        c.new=function(...)
+            local owner=(...)
+            local obj=originalNew(...)
+            if obj then obj._localOwner=(owner~=nil and owner==actor()) end
+            return obj
+        end
+        local originalUpdate=c.Update
+        c.Update=function(self,...)
+            local r=originalUpdate(self,...)
+            if self._localOwner and Toggles.attach_light_on and Toggles.attach_light_on.Value and Options.attach_light_color then
+                pcall(recolorFlash,self,Options.attach_light_color.Value)
+            end
+            return r
         end
     end
     local meleeRay=RaycastParams.new()
@@ -5183,18 +5217,6 @@ do
         end
         if w and not w._firearm and type(w._distance)=="number" then
             field(w,"_distance",A.Reach,A.Distance)
-            -- Fast swing: scale the swing cadence (_timer) and Slash->Impact gap (_delay) together.
-            -- field() keeps the original values, so turning it off restores them exactly.
-            if A.FastSwing and type(w._timer)=="number" and type(w._delay)=="number" then
-                local savedW=X.saved[w]
-                local baseTimer=savedW and savedW._timer and savedW._timer.value or w._timer
-                local baseDelay=savedW and savedW._delay and savedW._delay.value or w._delay
-                field(w,"_timer",true,math.max(.05,baseTimer/A.SwingSpeed))
-                field(w,"_delay",true,math.max(.05,baseDelay/A.SwingSpeed))
-            else
-                field(w,"_timer",false)
-                field(w,"_delay",false)
-            end
             if A.auraActive and A.class and me and not me.Locked and not me.Sprinting then
                 if os.clock()>=A.nextTargetScan then
                     A.nextTargetScan=os.clock()+.05
