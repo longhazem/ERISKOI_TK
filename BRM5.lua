@@ -4488,7 +4488,7 @@ do
         killTp      = false,
         tpStandoff  = 2,        -- studs from target the player stands while the hit lands
         tpRange     = 30,       -- max distance to a target Kill TP will teleport to
-        _tp         = nil,      -- active teleport window: { actor, pos, untilT }
+        _tp         = nil,      -- active ramped-TP cycle: { origPos }
         _lastFire   = {},
         _net        = nil,
         _remote     = nil,
@@ -4621,15 +4621,37 @@ do
         return ok
     end
 
-    table.insert(Combat.connections, AimRunService.Heartbeat:Connect(function()
-        local tp = AK2._tp
-        if tp then
-            if not AK2.enabled or tick() >= tp.untilT then
-                AK2_teleport(tp.origPos)
-                AK2._tp = nil
-                tp = nil
-            end
+    -- A single instant Teleport() call reliably moves actor.CFrame and fixed the jitter,
+    -- but kills still don't register -- which points at a SECOND, separate check: a jump
+    -- of 10-30 studs in one 0.1s ReplicateMovement tick is far beyond any legitimate sprint
+    -- speed (~24-26 studs/s = ~2.5 studs per tick). If the server runs its own anti-speedhack
+    -- clamp on received movement (independent of whether the client-reported position itself
+    -- is otherwise accepted), a single huge jump is exactly what that clamp exists to catch,
+    -- and ServerPosition would just stay near the old spot -- hit check still fails, silently.
+    -- Covering the same distance over several ticks, each within walkable-speed, is the one
+    -- way left to get ServerPosition to actually follow us without a server-issued Teleport.
+    local function AK2_teleport_ramped(targetPos, speed)
+        local svc = Combat.Service()
+        local actor = svc and svc.Replicator and svc.Replicator.LocalActor
+        local ctrl = Combat.Movement and Combat.Movement.currentController
+        if not (ctrl and actor and ctrl._localActor == actor and typeof(ctrl.Teleport) == "function") then return false end
+        local origin = actor.Position
+        if typeof(origin) ~= "Vector3" then return false end
+        local rot = typeof(actor.CFrame) == "CFrame" and actor.CFrame.Rotation or CFrame.new()
+        local dist = (targetPos - origin).Magnitude
+        local stepDist = (speed or 26) * 0.1
+        local steps = math.max(1, math.ceil(dist / stepDist))
+        for i = 1, steps do
+            local p = origin:Lerp(targetPos, i / steps)
+            local ok = pcall(function() ctrl:Teleport(CFrame.new(p) * rot, true) end)
+            if not ok then return false end
+            if i < steps then task.wait(0.1) end
         end
+        return true
+    end
+
+    table.insert(Combat.connections, AimRunService.Heartbeat:Connect(function()
+        if AK2._tp then return end
         if not AK2.enabled then return end
         local net = AK2_findNet()
         if not net then return end
@@ -4639,7 +4661,6 @@ do
         local now = tick(); local count = 0
         local myActor = svc and svc.Replicator and svc.Replicator.LocalActor
         local myPos = myActor and typeof(myActor.Position)=="Vector3" and myActor.Position
-        if tp then return end
         for uid, a in pairs(registry) do
             if count >= AK2.maxPerCycle then break end
             if not Combat.IsAlive(a) then continue end
@@ -4657,36 +4678,39 @@ do
             AK2._lastFire[uid] = now
             local hitPos = { pos.X, pos.Y + AK2.headYOffset, pos.Z }
             local slashArg = math.random(1, 3)
-            local fireDelay = 0
             if AK2.killTp and myActor and myPos then
                 -- Stand between the target and the spot we came from, on our own ground height.
                 local away = Vector3.new(myPos.X - pos.X, 0, myPos.Z - pos.Z)
                 local dir = away.Magnitude > 0 and away.Unit or Vector3.new(0, 0, 0)
                 local tpPos = Vector3.new(pos.X + dir.X * AK2.tpStandoff, myPos.Y, pos.Z + dir.Z * AK2.tpStandoff)
-                if AK2_teleport(tpPos) then
-                    -- ReplicatorService.Update only sends ReplicateMovement every 0.1s. Firing
-                    -- Slash/Impact same-frame as the teleport races that packet -- the server can
-                    -- still be holding our OLD position when it checks the hit, so it silently
-                    -- drops it (no kill, target stays up, aura retries -> looks like a jittery TP).
-                    -- Give the replicate tick a chance to land before swinging.
-                    fireDelay = 0.12
-                    AK2._tp = { origPos = myPos, untilT = now + fireDelay + AK2.impactDelay + 0.15 }
-                end
-            end
-            local function AK2_doSwing()
-                if not AK2.enabled then return end
-                AK2_fire(net, "InventoryAction", "Slash", slashArg)
-                -- MTC MeleeInventory._use: real client waits `_delay` (0.25-0.3s) after Slash
-                -- before raycasting + firing Impact. Matching that timing, not same-frame.
-                task.delay(AK2.impactDelay, function()
-                    if not AK2.enabled then return end
-                    local n = AK2_findNet(); if not n then return end
-                    AK2_fire(n, "InventoryAction", "Impact", hitPos, uid, AK2.hitPart)
+                AK2._tp = { origPos = myPos }
+                task.spawn(function()
+                    if not AK2_teleport_ramped(tpPos, 26) then AK2._tp = nil; return end
+                    task.wait(0.1)
+                    if AK2.enabled then
+                        AK2_fire(net, "InventoryAction", "Slash", slashArg)
+                        task.wait(AK2.impactDelay)
+                        if AK2.enabled then
+                            local n = AK2_findNet()
+                            if n then AK2_fire(n, "InventoryAction", "Impact", hitPos, uid, AK2.hitPart) end
+                        end
+                    end
+                    task.wait(0.1)
+                    AK2_teleport_ramped(myPos, 26)
+                    AK2._tp = nil
                 end)
+                count = count + 1
+                break
             end
-            if fireDelay > 0 then task.delay(fireDelay, AK2_doSwing) else AK2_doSwing() end
+            AK2_fire(net, "InventoryAction", "Slash", slashArg)
+            -- MTC MeleeInventory._use: real client waits `_delay` (0.25-0.3s) after Slash
+            -- before raycasting + firing Impact. Matching that timing, not same-frame.
+            task.delay(AK2.impactDelay, function()
+                if not AK2.enabled then return end
+                local n = AK2_findNet(); if not n then return end
+                AK2_fire(n, "InventoryAction", "Impact", hitPos, uid, AK2.hitPart)
+            end)
             count = count + 1
-            if AK2._tp then break end
         end
     end))
 
@@ -4768,14 +4792,7 @@ do
     end
 
     table.insert(Combat.connections, AimRunService.Heartbeat:Connect(function()
-        local tp = AK3._tp
-        if tp then
-            if not AK3.enabled or tick() >= tp.untilT then
-                AK2_teleport(tp.origPos)
-                AK3._tp = nil
-                tp = nil
-            end
-        end
+        if AK3._tp then return end
         if not AK3.enabled then return end
         local net = AK2_findNet()
         if not net then return end
@@ -4785,7 +4802,6 @@ do
         local now = tick(); local count = 0
         local myActor = svc and svc.Replicator and svc.Replicator.LocalActor
         local myPos = myActor and typeof(myActor.Position)=="Vector3" and myActor.Position
-        if tp then return end
         for uid, a in pairs(registry) do
             if count >= AK3.maxPerCycle then break end
             if not Combat.IsAlive(a) then continue end
@@ -4803,30 +4819,36 @@ do
             AK3._lastFire[uid] = now
             local hitPos = { pos.X, pos.Y + AK3.headYOffset, pos.Z }
             local slashArg = math.random(1, 3)
-            local fireDelay = 0
             if AK3.killTp and myActor and myPos then
                 local away = Vector3.new(myPos.X - pos.X, 0, myPos.Z - pos.Z)
                 local dir = away.Magnitude > 0 and away.Unit or Vector3.new(0, 0, 0)
                 local tpPos = Vector3.new(pos.X + dir.X * AK3.tpStandoff, myPos.Y, pos.Z + dir.Z * AK3.tpStandoff)
-                if AK2_teleport(tpPos) then
-                    -- Same replicate-race fix as AK2: let the 0.1s ReplicateMovement tick land
-                    -- on the server before the swing, or the server still has our old position.
-                    fireDelay = 0.12
-                    AK3._tp = { origPos = myPos, untilT = now + fireDelay + AK3.impactDelay + 0.15 }
-                end
-            end
-            local function AK3_doSwing()
-                if not AK3.enabled then return end
-                AK2_fire(net, "InventoryAction", "Slash", slashArg)
-                task.delay(AK3.impactDelay, function()
-                    if not AK3.enabled then return end
-                    local n = AK2_findNet(); if not n then return end
-                    AK2_fire(n, "InventoryAction", "Impact", hitPos, uid, AK3.hitPart)
+                AK3._tp = { origPos = myPos }
+                task.spawn(function()
+                    if not AK2_teleport_ramped(tpPos, 26) then AK3._tp = nil; return end
+                    task.wait(0.1)
+                    if AK3.enabled then
+                        AK2_fire(net, "InventoryAction", "Slash", slashArg)
+                        task.wait(AK3.impactDelay)
+                        if AK3.enabled then
+                            local n = AK2_findNet()
+                            if n then AK2_fire(n, "InventoryAction", "Impact", hitPos, uid, AK3.hitPart) end
+                        end
+                    end
+                    task.wait(0.1)
+                    AK2_teleport_ramped(myPos, 26)
+                    AK3._tp = nil
                 end)
+                count = count + 1
+                break
             end
-            if fireDelay > 0 then task.delay(fireDelay, AK3_doSwing) else AK3_doSwing() end
+            AK2_fire(net, "InventoryAction", "Slash", slashArg)
+            task.delay(AK3.impactDelay, function()
+                if not AK3.enabled then return end
+                local n = AK2_findNet(); if not n then return end
+                AK2_fire(n, "InventoryAction", "Impact", hitPos, uid, AK3.hitPart)
+            end)
             count = count + 1
-            if AK3._tp then break end
         end
     end))
 
