@@ -4657,23 +4657,34 @@ do
             AK2._lastFire[uid] = now
             local hitPos = { pos.X, pos.Y + AK2.headYOffset, pos.Z }
             local slashArg = math.random(1, 3)
+            local fireDelay = 0
             if AK2.killTp and myActor and myPos then
                 -- Stand between the target and the spot we came from, on our own ground height.
                 local away = Vector3.new(myPos.X - pos.X, 0, myPos.Z - pos.Z)
                 local dir = away.Magnitude > 0 and away.Unit or Vector3.new(0, 0, 0)
                 local tpPos = Vector3.new(pos.X + dir.X * AK2.tpStandoff, myPos.Y, pos.Z + dir.Z * AK2.tpStandoff)
                 if AK2_teleport(tpPos) then
-                    AK2._tp = { origPos = myPos, untilT = now + AK2.impactDelay + 0.15 }
+                    -- ReplicatorService.Update only sends ReplicateMovement every 0.1s. Firing
+                    -- Slash/Impact same-frame as the teleport races that packet -- the server can
+                    -- still be holding our OLD position when it checks the hit, so it silently
+                    -- drops it (no kill, target stays up, aura retries -> looks like a jittery TP).
+                    -- Give the replicate tick a chance to land before swinging.
+                    fireDelay = 0.12
+                    AK2._tp = { origPos = myPos, untilT = now + fireDelay + AK2.impactDelay + 0.15 }
                 end
             end
-            AK2_fire(net, "InventoryAction", "Slash", slashArg)
-            -- MTC MeleeInventory._use: real client waits `_delay` (0.25-0.3s) after Slash
-            -- before raycasting + firing Impact. Matching that timing, not same-frame.
-            task.delay(AK2.impactDelay, function()
+            local function AK2_doSwing()
                 if not AK2.enabled then return end
-                local n = AK2_findNet(); if not n then return end
-                AK2_fire(n, "InventoryAction", "Impact", hitPos, uid, AK2.hitPart)
-            end)
+                AK2_fire(net, "InventoryAction", "Slash", slashArg)
+                -- MTC MeleeInventory._use: real client waits `_delay` (0.25-0.3s) after Slash
+                -- before raycasting + firing Impact. Matching that timing, not same-frame.
+                task.delay(AK2.impactDelay, function()
+                    if not AK2.enabled then return end
+                    local n = AK2_findNet(); if not n then return end
+                    AK2_fire(n, "InventoryAction", "Impact", hitPos, uid, AK2.hitPart)
+                end)
+            end
+            if fireDelay > 0 then task.delay(fireDelay, AK2_doSwing) else AK2_doSwing() end
             count = count + 1
             if AK2._tp then break end
         end
@@ -4792,20 +4803,28 @@ do
             AK3._lastFire[uid] = now
             local hitPos = { pos.X, pos.Y + AK3.headYOffset, pos.Z }
             local slashArg = math.random(1, 3)
+            local fireDelay = 0
             if AK3.killTp and myActor and myPos then
                 local away = Vector3.new(myPos.X - pos.X, 0, myPos.Z - pos.Z)
                 local dir = away.Magnitude > 0 and away.Unit or Vector3.new(0, 0, 0)
                 local tpPos = Vector3.new(pos.X + dir.X * AK3.tpStandoff, myPos.Y, pos.Z + dir.Z * AK3.tpStandoff)
                 if AK2_teleport(tpPos) then
-                    AK3._tp = { origPos = myPos, untilT = now + AK3.impactDelay + 0.15 }
+                    -- Same replicate-race fix as AK2: let the 0.1s ReplicateMovement tick land
+                    -- on the server before the swing, or the server still has our old position.
+                    fireDelay = 0.12
+                    AK3._tp = { origPos = myPos, untilT = now + fireDelay + AK3.impactDelay + 0.15 }
                 end
             end
-            AK2_fire(net, "InventoryAction", "Slash", slashArg)
-            task.delay(AK3.impactDelay, function()
+            local function AK3_doSwing()
                 if not AK3.enabled then return end
-                local n = AK2_findNet(); if not n then return end
-                AK2_fire(n, "InventoryAction", "Impact", hitPos, uid, AK3.hitPart)
-            end)
+                AK2_fire(net, "InventoryAction", "Slash", slashArg)
+                task.delay(AK3.impactDelay, function()
+                    if not AK3.enabled then return end
+                    local n = AK2_findNet(); if not n then return end
+                    AK2_fire(n, "InventoryAction", "Impact", hitPos, uid, AK3.hitPart)
+                end)
+            end
+            if fireDelay > 0 then task.delay(fireDelay, AK3_doSwing) else AK3_doSwing() end
             count = count + 1
             if AK3._tp then break end
         end
