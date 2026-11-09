@@ -4685,15 +4685,13 @@ do
                 local tpPos = Vector3.new(pos.X + dir.X * AK2.tpStandoff, myPos.Y, pos.Z + dir.Z * AK2.tpStandoff)
                 AK2._tp = { origPos = myPos }
                 task.spawn(function()
+                    -- Order requested: Slash first (at the real position -- the swing itself
+                    -- is thrown legitimately), then walk to the target, then Impact once there.
+                    AK2_fire(net, "InventoryAction", "Slash", slashArg)
                     if not AK2_teleport_ramped(tpPos, 26) then AK2._tp = nil; return end
-                    task.wait(0.1)
                     if AK2.enabled then
-                        AK2_fire(net, "InventoryAction", "Slash", slashArg)
-                        task.wait(AK2.impactDelay)
-                        if AK2.enabled then
-                            local n = AK2_findNet()
-                            if n then AK2_fire(n, "InventoryAction", "Impact", hitPos, uid, AK2.hitPart) end
-                        end
+                        local n = AK2_findNet()
+                        if n then AK2_fire(n, "InventoryAction", "Impact", hitPos, uid, AK2.hitPart) end
                     end
                     task.wait(0.1)
                     AK2_teleport_ramped(myPos, 26)
@@ -4825,15 +4823,11 @@ do
                 local tpPos = Vector3.new(pos.X + dir.X * AK3.tpStandoff, myPos.Y, pos.Z + dir.Z * AK3.tpStandoff)
                 AK3._tp = { origPos = myPos }
                 task.spawn(function()
+                    AK2_fire(net, "InventoryAction", "Slash", slashArg)
                     if not AK2_teleport_ramped(tpPos, 26) then AK3._tp = nil; return end
-                    task.wait(0.1)
                     if AK3.enabled then
-                        AK2_fire(net, "InventoryAction", "Slash", slashArg)
-                        task.wait(AK3.impactDelay)
-                        if AK3.enabled then
-                            local n = AK2_findNet()
-                            if n then AK2_fire(n, "InventoryAction", "Impact", hitPos, uid, AK3.hitPart) end
-                        end
+                        local n = AK2_findNet()
+                        if n then AK2_fire(n, "InventoryAction", "Impact", hitPos, uid, AK3.hitPart) end
                     end
                     task.wait(0.1)
                     AK2_teleport_ramped(myPos, 26)
