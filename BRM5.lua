@@ -4397,10 +4397,12 @@ GunTracerSection:AddSlider({Text="Width",Flag="gun_tracer_width",Min=.02,Max=.3,
 do
     local X: {[string]: any}={classes={},nextScan=0,saved={},active=true}
     local V: {[string]: any}={Speed=false,SpeedValue=80,Stability=false,FastStart=false,Fly=false,FlySpeed=60,Noclip=false,Bounce=false,bounceStates=setmetatable({},{__mode="k"}),keyState={}}
-    local T={RPM=false,RPMValue=900,NoSpread=false,NoRecoil=false}
+    local T={RPM=false,RPMValue=900,NoSpread=false,NoRecoil=false,Rotation360=false,SpeedMult=1}
     local LP: {[string]: any}={Instant=false}
     local A: {[string]: any}={Headshot=false,FastSwing=false,SwingSpeed=2,Reach=false,Distance=8,Aura=false,Targets={Zombies=true,NPCs=true},keyState={},nextSwing=0,nextTargetScan=0}
-    Combat.Extensions=X;Combat.Vehicle=V;Combat.Turret=T;Combat.Melee=A
+    local ZM: {[string]: any}={Godmode=false}
+    local RL: {[string]: any}={Enabled=false,_log={},_count=0}
+    Combat.Extensions=X;Combat.Vehicle=V;Combat.Turret=T;Combat.Melee=A;Combat.Zombie=ZM;Combat.Radio=RL
     Gun.RPM=false;Gun.RPMValue=900
     Gun.NoCameraShake=false;Gun.SightZoom=false;Gun.Zoom=2;Gun.NoEquipDelay=false;Gun.Debug=false
     local function actor()
@@ -4485,10 +4487,6 @@ do
                                  -- validates Impact distance against this — stay close to it.
         impactDelay = 0.3,      -- MTC Melee.lua: real Slash→Impact gap is 0.25-0.3s (MeleeInventory._use).
                                  -- Firing both same-frame (old behavior) looks server-impossible.
-        killTp      = false,
-        tpStandoff  = 2,        -- studs from target the player stands while the hit lands
-        tpRange     = 30,       -- max distance to a target Kill TP will teleport to
-        _tp         = nil,      -- active ramped-TP cycle: { origPos }
         _lastFire   = {},
         _net        = nil,
         _remote     = nil,
@@ -4605,53 +4603,7 @@ do
         if not ok then AK2._net = nil end
     end
 
-    -- CharacterController.lua (the "charactercontrollable.lua" controller):Teleport sets
-    -- Position/SimulatedPosition/CFrame/ForceNextPosition/_position together in one call,
-    -- and skips the only guard (TeleportRevision check) when no revision is passed.
-    -- Spoofing ForceNextPosition alone never moved actor.CFrame (ActorClass.Update lerps
-    -- CFrame from SimulatedPosition, which CharacterController.Update keeps rewriting from
-    -- its own ctrl._position every frame) -- that's why the character stood still.
-    local function AK2_teleport(pos)
-        local svc = Combat.Service()
-        local actor = svc and svc.Replicator and svc.Replicator.LocalActor
-        local ctrl = Combat.Movement and Combat.Movement.currentController
-        if not (ctrl and actor and ctrl._localActor == actor and typeof(ctrl.Teleport) == "function") then return false end
-        local rot = typeof(actor.CFrame) == "CFrame" and actor.CFrame.Rotation or CFrame.new()
-        local ok = pcall(function() ctrl:Teleport(CFrame.new(pos) * rot, true) end)
-        return ok
-    end
-
-    -- A single instant Teleport() call reliably moves actor.CFrame and fixed the jitter,
-    -- but kills still don't register -- which points at a SECOND, separate check: a jump
-    -- of 10-30 studs in one 0.1s ReplicateMovement tick is far beyond any legitimate sprint
-    -- speed (~24-26 studs/s = ~2.5 studs per tick). If the server runs its own anti-speedhack
-    -- clamp on received movement (independent of whether the client-reported position itself
-    -- is otherwise accepted), a single huge jump is exactly what that clamp exists to catch,
-    -- and ServerPosition would just stay near the old spot -- hit check still fails, silently.
-    -- Covering the same distance over several ticks, each within walkable-speed, is the one
-    -- way left to get ServerPosition to actually follow us without a server-issued Teleport.
-    local function AK2_teleport_ramped(targetPos, speed)
-        local svc = Combat.Service()
-        local actor = svc and svc.Replicator and svc.Replicator.LocalActor
-        local ctrl = Combat.Movement and Combat.Movement.currentController
-        if not (ctrl and actor and ctrl._localActor == actor and typeof(ctrl.Teleport) == "function") then return false end
-        local origin = actor.Position
-        if typeof(origin) ~= "Vector3" then return false end
-        local rot = typeof(actor.CFrame) == "CFrame" and actor.CFrame.Rotation or CFrame.new()
-        local dist = (targetPos - origin).Magnitude
-        local stepDist = (speed or 26) * 0.1
-        local steps = math.max(1, math.ceil(dist / stepDist))
-        for i = 1, steps do
-            local p = origin:Lerp(targetPos, i / steps)
-            local ok = pcall(function() ctrl:Teleport(CFrame.new(p) * rot, true) end)
-            if not ok then return false end
-            if i < steps then task.wait(0.1) end
-        end
-        return true
-    end
-
     table.insert(Combat.connections, AimRunService.Heartbeat:Connect(function()
-        if AK2._tp then return end
         if not AK2.enabled then return end
         local net = AK2_findNet()
         if not net then return end
@@ -4674,32 +4626,10 @@ do
             if (now - (AK2._lastFire[uid] or 0)) < AK2.cooldown then continue end
             local pos = a.Position
             if typeof(pos) ~= "Vector3" then continue end
-            if myPos and (pos - myPos).Magnitude > (AK2.killTp and AK2.tpRange or AK2.range) then continue end
+            if myPos and (pos - myPos).Magnitude > AK2.range then continue end
             AK2._lastFire[uid] = now
             local hitPos = { pos.X, pos.Y + AK2.headYOffset, pos.Z }
             local slashArg = math.random(1, 3)
-            if AK2.killTp and myActor and myPos then
-                -- Stand between the target and the spot we came from, on our own ground height.
-                local away = Vector3.new(myPos.X - pos.X, 0, myPos.Z - pos.Z)
-                local dir = away.Magnitude > 0 and away.Unit or Vector3.new(0, 0, 0)
-                local tpPos = Vector3.new(pos.X + dir.X * AK2.tpStandoff, myPos.Y, pos.Z + dir.Z * AK2.tpStandoff)
-                AK2._tp = { origPos = myPos }
-                task.spawn(function()
-                    -- Order requested: Slash first (at the real position -- the swing itself
-                    -- is thrown legitimately), then walk to the target, then Impact once there.
-                    AK2_fire(net, "InventoryAction", "Slash", slashArg)
-                    if not AK2_teleport_ramped(tpPos, 26) then AK2._tp = nil; return end
-                    if AK2.enabled then
-                        local n = AK2_findNet()
-                        if n then AK2_fire(n, "InventoryAction", "Impact", hitPos, uid, AK2.hitPart) end
-                    end
-                    task.wait(0.1)
-                    AK2_teleport_ramped(myPos, 26)
-                    AK2._tp = nil
-                end)
-                count = count + 1
-                break
-            end
             AK2_fire(net, "InventoryAction", "Slash", slashArg)
             -- MTC MeleeInventory._use: real client waits `_delay` (0.25-0.3s) after Slash
             -- before raycasting + firing Impact. Matching that timing, not same-frame.
@@ -4731,14 +4661,6 @@ do
     ak2l:AddSlider({Text="Hit Cooldown",Flag="ak2_cooldown",
         Min=0.05,Max=2.0,Default=0.15,Rounding=0.05,Suffix=" s",
         Callback=function(v) AK2.cooldown=math.clamp(v,0.05,2.0) end})
-    ak2l:AddToggle({Text="Kill TP (teleport, kill, return)",Flag="ak2_kill_tp",Default=false,
-        Callback=function(v) AK2.killTp=v end})
-    ak2l:AddSlider({Text="TP Standoff",Flag="ak2_tp_standoff",
-        Min=1,Max=5,Default=2,Rounding=0.5,Suffix=" st",
-        Callback=function(v) AK2.tpStandoff=math.clamp(v,1,5) end})
-    ak2l:AddSlider({Text="TP Range",Flag="ak2_tp_range",
-        Min=5,Max=1000,Default=30,Rounding=1,Suffix=" st",
-        Callback=function(v) AK2.tpRange=math.clamp(v,5,1000) end})
     ak2l:AddSlider({Text="Head Y Offset",Flag="ak2_head_y_offset",
         Min=0.5,Max=2.5,Default=1.5,Rounding=0.05,Suffix=" st",
         Callback=function(v) AK2.headYOffset=math.clamp(v,0.5,2.5) end})
@@ -4753,136 +4675,87 @@ do
         task.spawn(function() AK2_findNet(); AK2_getRemote() end)
     end})
 
-    -- ── Aura Kill V3 ─────────────────────────────────────────────────────────
-    -- Same engine as V2 (AK2_findNet/AK2_fire/AK2_teleport are shared, not AK2-only).
-    -- Difference: range check + hit position read the TARGET's ServerPosition first.
-    -- ActorClass.Replicate (MTC) writes SimulatedPosition = client-reported pos and
-    -- ServerPosition = the server's own authoritative pos; ReplicatorService.GetActorPosition
-    -- and the spotted/hit logic both read ServerPosition for anyone that isn't UseClient
-    -- (i.e. every target). a.Position can lag/interpolate on fast movers -- ServerPosition
-    -- is the raw figure the server itself believes, so targeting off it is more honest
-    -- about what will actually register as in range.
-    local AK3: {[string]: any} = {
-        enabled     = false,
-        killAI      = true,
-        killZombie  = true,
-        killPlayer  = false,
-        hitPart     = "Head",
-        maxPerCycle = 12,
-        cooldown    = 0.15,
-        headYOffset = 1.5,
-        range       = 6,
-        impactDelay = 0.3,
-        killTp      = false,
-        tpStandoff  = 2,
-        tpRange     = 30,
-        _tp         = nil,      -- { origPos, untilT }
-        _lastFire   = {},
-    }
-    Combat.AK3 = AK3
-
-    local function AK3_targetPos(a)
-        local sp = a.ServerPosition
-        if typeof(sp) == "Vector3" then return sp end
-        local p = a.Position
-        if typeof(p) == "Vector3" then return p end
-        return nil
+    -- ── Radio / Chat Logger ─────────────────────────────────────────────────────────────
+    -- RadioInterface.lua listens to TextChatService.SendingMessage and the "Main" channel's
+    -- MessageReceived -- stock Roblox signals, not game-specific, so a second listener next to
+    -- the game's own is pure reading, nothing spoofed or intercepted. Metadata is JSON:
+    -- {Radio, Channel, HasRadio}, decoded the same way RadioInterface._addRadio does it.
+    -- The stock panel only shows messages matching the channel you're tuned to right now
+    -- (_addRadio returns early when "Channel ~= self._channel"); this logs every channel at
+    -- once, which the game's own UI never does.
+    local RLGui, RLList, RLScroll
+    local function RL_build()
+        if RLGui then return end
+        local gui=Instance.new("ScreenGui");gui.Name="RadioLogger";gui.ResetOnSpawn=false
+        gui.Parent=(gethui and gethui()) or game:GetService("CoreGui")
+        local frame=Instance.new("Frame");frame.Size=UDim2.fromOffset(360,260)
+        frame.Position=UDim2.new(1,-376,0,16);frame.BackgroundColor3=Color3.fromRGB(15,15,15)
+        frame.BackgroundTransparency=0.15;frame.BorderSizePixel=0;frame.Parent=gui
+        local corner=Instance.new("UICorner");corner.CornerRadius=UDim.new(0,6);corner.Parent=frame
+        local title=Instance.new("TextLabel");title.Size=UDim2.new(1,0,0,24);title.BackgroundTransparency=1
+        title.Text=" Radio Log";title.TextXAlignment=Enum.TextXAlignment.Left;title.TextColor3=Color3.new(1,1,1)
+        title.Font=Enum.Font.Code;title.TextSize=16;title.Parent=frame
+        local scroll=Instance.new("ScrollingFrame");scroll.Size=UDim2.new(1,-8,1,-32)
+        scroll.Position=UDim2.new(0,4,0,28);scroll.BackgroundTransparency=1;scroll.BorderSizePixel=0
+        scroll.ScrollBarThickness=4;scroll.AutomaticCanvasSize=Enum.AutomaticSize.Y
+        scroll.CanvasSize=UDim2.new(0,0,0,0);scroll.Parent=frame
+        local list=Instance.new("UIListLayout");list.SortOrder=Enum.SortOrder.LayoutOrder
+        list.Padding=UDim.new(0,2);list.Parent=scroll
+        RLGui=gui;RLScroll=scroll;RLList=list
+        gui.Enabled=RL.Enabled
     end
-
-    table.insert(Combat.connections, AimRunService.Heartbeat:Connect(function()
-        if AK3._tp then return end
-        if not AK3.enabled then return end
-        local net = AK2_findNet()
-        if not net then return end
-        local svc = Combat.Service()
-        local registry = svc and svc.Replicator and svc.Replicator.Actors
-        if not registry then return end
-        local now = tick(); local count = 0
-        local myActor = svc and svc.Replicator and svc.Replicator.LocalActor
-        local myPos = myActor and typeof(myActor.Position)=="Vector3" and myActor.Position
-        for uid, a in pairs(registry) do
-            if count >= AK3.maxPerCycle then break end
-            if not Combat.IsAlive(a) then continue end
-            local kind = Combat.Kind(a)
-            if not kind then continue end
-            local allow = false
-            if kind == "Zombies" and AK3.killZombie then allow = true end
-            if kind == "NPCs"    and AK3.killAI     then allow = true end
-            if kind == "Players" and AK3.killPlayer then allow = true end
-            if not allow then continue end
-            if (now - (AK3._lastFire[uid] or 0)) < AK3.cooldown then continue end
-            local pos = AK3_targetPos(a)
-            if not pos then continue end
-            if myPos and (pos - myPos).Magnitude > (AK3.killTp and AK3.tpRange or AK3.range) then continue end
-            AK3._lastFire[uid] = now
-            local hitPos = { pos.X, pos.Y + AK3.headYOffset, pos.Z }
-            local slashArg = math.random(1, 3)
-            if AK3.killTp and myActor and myPos then
-                local away = Vector3.new(myPos.X - pos.X, 0, myPos.Z - pos.Z)
-                local dir = away.Magnitude > 0 and away.Unit or Vector3.new(0, 0, 0)
-                local tpPos = Vector3.new(pos.X + dir.X * AK3.tpStandoff, myPos.Y, pos.Z + dir.Z * AK3.tpStandoff)
-                AK3._tp = { origPos = myPos }
-                task.spawn(function()
-                    AK2_fire(net, "InventoryAction", "Slash", slashArg)
-                    if not AK2_teleport_ramped(tpPos, 26) then AK3._tp = nil; return end
-                    if AK3.enabled then
-                        local n = AK2_findNet()
-                        if n then AK2_fire(n, "InventoryAction", "Impact", hitPos, uid, AK3.hitPart) end
-                    end
-                    task.wait(0.1)
-                    AK2_teleport_ramped(myPos, 26)
-                    AK3._tp = nil
-                end)
-                count = count + 1
-                break
+    local function RL_push(user,channelName,isRadio,text)
+        RL_build()
+        RL._count=RL._count+1
+        local log=RL._log
+        log[#log+1]={t=os.date("%H:%M:%S"),user=user,channel=channelName,radio=isRadio,text=text}
+        if #log>200 then table.remove(log,1) end
+        local label=Instance.new("TextLabel");label.Size=UDim2.new(1,0,0,0)
+        label.AutomaticSize=Enum.AutomaticSize.Y;label.BackgroundTransparency=1
+        label.TextWrapped=true;label.TextXAlignment=Enum.TextXAlignment.Left
+        label.TextYAlignment=Enum.TextYAlignment.Top;label.Font=Enum.Font.Code;label.TextSize=13
+        label.TextColor3=isRadio and Color3.fromRGB(150,220,255) or Color3.fromRGB(220,220,220)
+        label.Text=string.format("[%s] %s%s: %s",os.date("%H:%M:%S"),isRadio and ("("..channelName..") ") or "",user,text)
+        label.LayoutOrder=RL._count;label.Parent=RLScroll
+        task.defer(function() if RLScroll then RLScroll.CanvasPosition=Vector2.new(0,math.huge) end end)
+        while RLScroll and #RLScroll:GetChildren()>60 do
+            local removed=false
+            for _,child in ipairs(RLScroll:GetChildren()) do
+                if child:IsA("TextLabel") then child:Destroy();removed=true;break end
             end
-            AK2_fire(net, "InventoryAction", "Slash", slashArg)
-            task.delay(AK3.impactDelay, function()
-                if not AK3.enabled then return end
-                local n = AK2_findNet(); if not n then return end
-                AK2_fire(n, "InventoryAction", "Impact", hitPos, uid, AK3.hitPart)
-            end)
-            count = count + 1
+            if not removed then break end
         end
-    end))
-
-    local ak3l = mp:AddSection({Title="Aura Kill V3",Side="Right"})
-    ak3l:AddToggle({Text="Enable",Flag="ak3_enabled",Default=false,
-        Callback=function(v) AK3.enabled=v end})
-    ak3l:AddToggle({Text="Kill NPCs",Flag="ak3_kill_ai",Default=true,
-        Callback=function(v) AK3.killAI=v end})
-    ak3l:AddToggle({Text="Kill Zombies",Flag="ak3_kill_zombie",Default=true,
-        Callback=function(v) AK3.killZombie=v end})
-    ak3l:AddToggle({Text="Kill Players",Flag="ak3_kill_player",Default=false,
-        Callback=function(v) AK3.killPlayer=v end})
-    ak3l:AddDropdown({Text="Hit Part",Flag="ak3_hitpart",
-        Options={"Head","UpperTorso","LowerTorso","LeftUpperArm","RightUpperArm","LeftUpperLeg","RightUpperLeg"},
-        Default="Head",
-        Callback=function(v) AK3.hitPart=v end})
-    ak3l:AddSlider({Text="Max Targets/Tick",Flag="ak3_max_targets",
-        Min=1,Max=30,Default=12,Rounding=1,Suffix="",
-        Callback=function(v) AK3.maxPerCycle=math.clamp(v,1,30) end})
-    ak3l:AddSlider({Text="Hit Cooldown",Flag="ak3_cooldown",
-        Min=0.05,Max=2.0,Default=0.15,Rounding=0.05,Suffix=" s",
-        Callback=function(v) AK3.cooldown=math.clamp(v,0.05,2.0) end})
-    ak3l:AddToggle({Text="Kill TP (teleport, kill, return)",Flag="ak3_kill_tp",Default=false,
-        Callback=function(v) AK3.killTp=v end})
-    ak3l:AddSlider({Text="TP Standoff",Flag="ak3_tp_standoff",
-        Min=1,Max=5,Default=2,Rounding=0.5,Suffix=" st",
-        Callback=function(v) AK3.tpStandoff=math.clamp(v,1,5) end})
-    ak3l:AddSlider({Text="TP Range",Flag="ak3_tp_range",
-        Min=5,Max=1000,Default=30,Rounding=1,Suffix=" st",
-        Callback=function(v) AK3.tpRange=math.clamp(v,5,1000) end})
-    ak3l:AddSlider({Text="Head Y Offset",Flag="ak3_head_y_offset",
-        Min=0.5,Max=2.5,Default=1.5,Rounding=0.05,Suffix=" st",
-        Callback=function(v) AK3.headYOffset=math.clamp(v,0.5,2.5) end})
-    ak3l:AddSlider({Text="Range",Flag="ak3_range",
-        Min=5,Max=30,Default=6,Rounding=1,Suffix=" st",
-        Callback=function(v) AK3.range=math.clamp(v,5,30) end})
-    ak3l:AddSlider({Text="Impact Delay",Flag="ak3_impact_delay",
-        Min=0,Max=1,Default=0.3,Rounding=0.05,Suffix=" s",
-        Callback=function(v) AK3.impactDelay=math.clamp(v,0,1) end})
-
+    end
+    task.spawn(function()
+        local ok1,hs=pcall(game.GetService,game,"HttpService")
+        local ok2,tcs=pcall(game.GetService,game,"TextChatService")
+        if not (ok1 and ok2) then return end
+        local ok3,channel=pcall(function() return tcs:WaitForChild("Main",10) end)
+        local function onMessage(msg)
+            if not RL.Enabled then return end
+            local source=msg.TextSource
+            if not source then return end
+            local plr=AimPlayers:GetPlayerByUserId(source.UserId)
+            if not plr then return end
+            local meta={}
+            if type(msg.Metadata)=="string" and msg.Metadata~="" then
+                local dok,d=pcall(hs.JSONDecode,hs,msg.Metadata)
+                if dok and type(d)=="table" then meta=d end
+            end
+            local channelName=type(meta.Channel)=="string" and meta.Channel or "000"
+            RL_push(plr.DisplayName,channelName,meta.Radio and true or false,msg.Text)
+        end
+        tcs.SendingMessage:Connect(onMessage)
+        if ok3 and channel then channel.MessageReceived:Connect(onMessage) end
+    end)
+    local rls=SharedPage:AddSection({Title="Radio Logger",Side="Left"})
+    rls:AddToggle({Text="Enabled",Flag="radio_logger_enabled",Default=false,Callback=function(v)
+        RL.Enabled=v;RL_build();if RLGui then RLGui.Enabled=v end
+    end})
+    rls:AddButton({Text="Clear Log",Callback=function()
+        RL._log={}
+        if RLScroll then for _,child in ipairs(RLScroll:GetChildren()) do if child:IsA("TextLabel") then child:Destroy() end end end
+    end})
 
     local vp=VehiclePage
     local vl=vp:AddSection({Title="Driving",Side="Left"});local vr=vp:AddSection({Title="Flight",Side="Right"})
@@ -5071,16 +4944,31 @@ do
     slider(ts,"Turret RPM",T,"RPMValue","turret_rpm_value",60,3000,900,10," RPM")
     toggle(ts,"No Spread",T,"NoSpread","turret_no_spread")
     toggle(ts,"No Recoil",T,"NoRecoil","turret_no_recoil")
+    toggle(ts,"360 Rotation",T,"Rotation360","turret_360_rotation")
+    slider(ts,"Rotation Speed",T,"SpeedMult","turret_speed_mult",0.5,10,1,0.5,"x")
+
+    -- Godmode holds Health up locally (ActorClass.Replicate + the "Dead" State signal, both
+    -- hooked above via installers.ActorClass). Confirmed: stops the local ragdoll/death screen
+    -- from firing. Not confirmed: whether the server tracks its own authoritative health/kill
+    -- outcome independently of what it replicates down -- no server script in the source to check.
+    local zs=ZombiePage:AddSection({Title="Survival",Side="Right"})
+    toggle(zs,"Godmode",ZM,"Godmode","zm_godmode")
+
     local function applyGun(w)
         if localWeapon(w) then Gun.ApplyWeapon(w) end
     end
     local function applyTurret(ctrl)
         if not ctrl or type(ctrl._config)~="table" then return end
-        if X.turret and X.turret~=ctrl then restore(X.turret._config) end
+        if X.turret and X.turret~=ctrl then restore(X.turret._config);restore(X.turret) end
         X.turret=ctrl
         local c=ctrl._config
         field(c,"RPM",T.RPM,T.RPMValue);field(c,"Barrel_Spread",T.NoSpread,0)
         field(c,"Recoil_Base",T.NoRecoil,Vector2.zero);field(c,"Recoil_Range",T.NoRecoil,Vector2.zero)
+        -- TurretController.Update: "if ctrl._limit and ctrl._limit<360 then <clamp to cone, return early> end".
+        -- Below that limit it also skips the FireServer("ReplicateTurret",...) call entirely, so
+        -- lifting it doesn't just unclamp the view -- it lets the full-circle facing actually reach
+        -- the server through the same remote a legitimate turn already uses.
+        field(ctrl,"_limit",T.Rotation360,360)
     end
     local installers={}
     installers.FirearmInventory=function(c)
@@ -5136,9 +5024,47 @@ do
             end end)
         end
         Gun.Hook(c,"Destroy",function(original) return function(ctrl,...)
-            restore(ctrl._config);if X.turret==ctrl then X.turret=nil end
+            restore(ctrl._config);restore(ctrl);if X.turret==ctrl then X.turret=nil end
             return original(ctrl,...)
         end end)
+    end
+    -- TurretPrefab.Update(self,dt): the physical rig that TurretController's own Sight/
+    -- camera is welded to. Current = Current:Lerp(Facing, dt/angleDelta*1.5) every tick --
+    -- that 1.5 is the only traverse-speed constant in the whole chain. Scaling dt before the
+    -- real Update runs scales how fast the barrel (and the operator's own sight with it)
+    -- catches up to where the mouse is pointing. Self.Focused is only true for the turret
+    -- the LOCAL player is currently seated in (TurretController.new sets it), so other
+    -- players' turrets on screen are never touched.
+    installers.TurretPrefab=function(c)
+        local originalUpdate=c.Update
+        c.Update=function(self,dt,...)
+            if self.Focused and T.SpeedMult and T.SpeedMult~=1 and typeof(dt)=="number" then
+                return originalUpdate(self,dt*T.SpeedMult,...)
+            end
+            return originalUpdate(self,dt,...)
+        end
+    end
+    -- ActorClass carries Health for every actor, local player included. Two separate paths
+    -- can drive it to 0: the ordinary per-tick Replicate(health,...) from ReplicateMovement,
+    -- and a direct State(self,"Dead",pos) signal that force-sets Health=0 regardless of what
+    -- Replicate last said. Godmode has to hold both, or a "Dead" state still slips Health
+    -- through and Update()'s "if Alive and Health<=0 then Died() end" still fires locally.
+    -- Only ever touches self==actor() -- never another player's or a zombie's actor.
+    installers.ActorClass=function(c)
+        local originalReplicate=c.Replicate
+        c.Replicate=function(self,health,...)
+            if ZM.Godmode and self==actor() and typeof(health)=="number" and health<=0 then
+                health=1
+            end
+            return originalReplicate(self,health,...)
+        end
+        local originalState=c.State
+        if type(originalState)=="function" then
+            c.State=function(self,key,value,...)
+                if ZM.Godmode and self==actor() and key=="Dead" then return end
+                return originalState(self,key,value,...)
+            end
+        end
     end
     installers.MeleeInventory=function(c) A.class=c end
     installers.LockPickController=function(c)
@@ -5512,15 +5438,8 @@ do
         if X.autoSwing and X.meleeWeapon then X.meleeWeapon._swinging=false end
         for object in pairs(X.saved) do restore(object) end
         restoreAttachmentColors()
-        if AK2._tp then
-            AK2_teleport(AK2._tp.origPos)
-            AK2._tp = nil
-        end
-        if AK3._tp then
-            AK2_teleport(AK3._tp.origPos)
-            AK3._tp = nil
-        end
         if X.hud then X.hud:Destroy() end
+        if RLGui then RLGui:Destroy() end
         oldDestroy()
     end
     table.insert(Combat.connections,AimRunService.RenderStepped:Connect(function()
