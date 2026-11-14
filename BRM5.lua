@@ -2058,6 +2058,9 @@ local function visualPage(name)
         local group = info.Side == 'Right' and Tabs.Visuals:AddRightGroupbox(info.Title)
             or Tabs.Visuals:AddLeftGroupbox(info.Title)
         table.insert(self.Groups, group)
+        -- Sections created after addSubtabs('Visuals') ran take their page's current visibility;
+        -- the subtab pass only sets groups that existed when it ran.
+        if self.Active ~= nil then group.Container.Parent.Parent.Visible = self.Active end
         local section = {}
         local lastToggle
         function section:AddToggle(data)
@@ -2093,6 +2096,9 @@ local function visualPage(name)
                 data.Callback(color, data.Transparency ~= nil and 1 - picker.Transparency or nil)
             end)
             return picker
+        end
+        function section:AddButton(data)
+            return group:AddButton(data.Text or data.Name or "Button", data.Callback or function() end)
         end
         return section
     end
